@@ -68,13 +68,23 @@ class filter:
     self.datemin = datetime.min
     self.rep = []
 
+  def set_type(self, type):
+    self.type = type.upper()
+
   def set_re(self, restr):
     self.rep.append(re.compile(restr))
 
-class ServiceLog:
-  def __init__(self, ip, name, logdir=None):
-    self.name = name
-    self.ip = ip
+  def set_datemin(self, dstr):
+    '''
+    Specify date in "%Y%m%d %H:%M:%S.%f" format, ex:20180526 02:31:01.586469"
+    '''
+    self.datemin = datetime.strptime(dstr, "%Y%m%d %H:%M:%S.%f")
+
+  def set_datemax(self, dstr):
+    '''
+    Specify date in "%Y%m%d %H:%M:%S.%f" format, ex:20180526 02:31:01.586469"
+    '''
+    self.datemax = datetime.strptime(dstr, "%Y%m%d %H:%M:%S.%f")
 
 #pathre=r"(?P<service>^.*)\.[nN][tT][nN][xX].*\.log\..*\.(?P<date>\d+)-(?P<time>\d+).(?P<ddd>\d+)"
 pathre=r"^.*\.log.*\.(?P<date>\d+)-(?P<time>\d+)\.(?P<ddd>.*)"
@@ -88,19 +98,21 @@ def readlog(logdir=None, filter=None):
     d1 = None
     d2 = None
 
-    #try to avoid logs created after the time range
-    if filter and filter.service and filter.service not in f:
-      continue
-    match = re.match(f, pathre)
+    # try to avoid logs not in filter criteria
+    if filter:
+      if filter.service and filter.service not in f:
+        #print "skipping %s" % f
+        continue
+      if filter.type not in f:
+        continue
+
+    match = re.compile(pathre).match(f)
     if match:
-      mdict=match.matchdict()
-      start_date = datetime.datetime.strptime(md["date"] + md["time"], "%Y%m%d%H%M%S")
-      if filter:
-        if filter.datemin and filter.datemax < start_date:
-          continue
-        print filter.service, md["service"]
-        if filter.service != md["service"]:
-          continue
+      md=match.groupdict()
+      start_date = datetime.strptime(md["date"] + md["time"], "%Y%m%d%H%M%S")
+      if filter and filter.datemin and filter.datemax < start_date:
+        print "skipping %s" % (filter.datemin,f)
+        continue
 
     logfile=os.path.join(logdir, f);
     if os.path.isfile(logfile):
@@ -154,13 +166,13 @@ def readlog(logdir=None, filter=None):
 def applyfilter(record, filter):
   ret = False
   if filter.ip != "0" and record.ip != filter.ip:
-    ret = False
+    return False
   if filter.datemax < record.date:
-    ret = False
+    return False
   if filter.datemin > record.date:
-    ret = False
+    return False
   if filter.service != record.service:
-    ret = False
+    return False
 
   if filter.rep:
     for reitem in filter.rep:
