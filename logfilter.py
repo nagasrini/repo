@@ -17,6 +17,9 @@ logentry_re_m = r'^(\w)(\d+\ \d+\:\d+\:\d+\.\d+) (\d+) (\S+):(\d+). (\w+.*) [{].
 logcollector_firstline_re = r'^\*.* = (\d+/\d+/\d+)-(\d+:\d+:\d+).* = (\d+/\d+/\d+)-(\d+:\d+:\d+)'
 clusterlog_firstline_re=r'^.*: (\d+/\d+/\d+) (\d+:\d+:\d+)'
 
+
+
+log.initialize("/home/nutanix/logfilter.INFO")
 class logentry:
   def __init__(self, ip, service, year, entry):
     self.ip = ip;
@@ -35,7 +38,7 @@ class logentry:
     print self.get_str()
 
   def __repr__(self):
-    return ("|%s| %s %s|%s|%s:%s %s") % (self.ip, self.type, self.date.strftime("%m%d %H:%M:%S.%f"), self.thrid, self.file, self.line, self.msg)
+    return ("|%s|%10.10s| %s %s|%s|%s:%s %s") % (self.ip, self.service, self.type, self.date.strftime("%m%d %H:%M:%S.%f"), self.thrid, self.file, self.line, self.msg)
 
   def appendmsg(self, msg):
     self.msg = self.msg + msg
@@ -60,7 +63,6 @@ class logentry:
 
 
 class filter:
-
   def __init__(self, fstr):
     self.service = None
     self.ip = None
@@ -84,12 +86,15 @@ class filter:
     if len(l[4]):
       self.set_datemax(l[4])
     if len(l[5]):
-      self.set_re(l[5])
+      self.set_re(l[5].strip("\"").strip("\'"))
+    else:
+      self.set_re("^.*$")
 
   def set_type(self, t):
     self.type = self.ftype[t]
 
   def set_re(self, restr):
+    print "re <%s>" % restr
     self.rep.append(re.compile(restr))
 
   def set_datemin(self, dstr):
@@ -130,6 +135,8 @@ def read_one_logfile(logfile, filter):
   if d1:
     year = d1.year
 
+  service = os.path.basename(logfile).split(".")[0]
+  lelist = []
   year_change_hint = False
   for line in file:
     #print "DEBUG: line %s" % (line)
@@ -151,10 +158,10 @@ def read_one_logfile(logfile, filter):
       year_change_hint = False
 
     #apply filter if any
-    le = logentry("0", "cerebro", le_year, entry)
-    if filter and applyfilter(le, filter):
+    le = logentry("0", service, le_year, entry)
+    #log.INFO("%s %s" % (le.service , le.date))
+    if filter and applyfilters(le, [filter]):
       lelist.append(le)
-  lelist.sort()
   return lelist
 
 #pathre=r"(?P<service>^.*)\.[nN][tT][nN][xX].*\.log\..*\.(?P<date>\d+)-(?P<time>\d+).(?P<ddd>\d+)"
@@ -187,12 +194,12 @@ def readlog(logdir=None, filters=None):
         md=match.groupdict()
         start_date = datetime.strptime(md["date"] + md["time"], "%Y%m%d%H%M%S")
         if afilter and afilter.datemin and afilter.datemax < start_date:
-          print "skipping %s" % (afilter.datemin,f)
+          print "skipping %s < %s %s" % (afilter.datemax, start_date, f)
           continue
 
       log.INFO("Processing %s" % logfile)
       print "Processing %s with filter" % logfile
-      loglist = read_one_logfile(logfile, afilter)
+      loglist.extend(read_one_logfile(logfile, afilter))
       break
 
   loglist.sort()
@@ -201,7 +208,7 @@ def readlog(logdir=None, filters=None):
 def applyfilters(record, filters):
   ret = False
   for filter in filters:
-    if filter.ip != "0" and record.ip != filter.ip:
+    if filter.ip != None and record.ip != filter.ip:
       continue
     if filter.datemax < record.date:
       continue
@@ -212,11 +219,13 @@ def applyfilters(record, filters):
 
     if filter.rep:
       for reitem in filter.rep:
+        log.INFO("%s" % record)
         match = reitem.match(record.msg)
         if match:
           ret = True
           break;
+    else:
+      ret = True
 
-  #record.prn()
   return ret
 
