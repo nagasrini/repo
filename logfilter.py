@@ -205,6 +205,7 @@ def readlog(logdir=None, filters=None):
   loglist.sort()
   return loglist
 
+#new
 def applyfilters(record, filters):
   ret = False
   for filter in filters:
