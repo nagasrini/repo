@@ -108,8 +108,10 @@ class filter:
     Specify date in "%Y%m%d %H:%M:%S.%f" format, ex:20180526 02:31:01.586469"
     '''
     self.datemax = datetime.strptime(dstr, "%Y%m%d %H:%M:%S.%f")
+
+import multiprocessing as mp
  
-def read_one_logfile(logfile, filter):
+def read_one_logfile(q, logfile, filter):
   '''
   reads one log file and returns logentry object
   '''
@@ -162,7 +164,8 @@ def read_one_logfile(logfile, filter):
     #log.INFO("%s %s" % (le.service , le.date))
     if filter and applyfilters(le, [filter]):
       lelist.append(le)
-  return lelist
+  q.put(lelist)
+
 
 #pathre=r"(?P<service>^.*)\.[nN][tT][nN][xX].*\.log\..*\.(?P<date>\d+)-(?P<time>\d+).(?P<ddd>\d+)"
 pathre=r"^.*\.log.*\.(?P<date>\d+)-(?P<time>\d+)\.(?P<ddd>.*)"
@@ -171,6 +174,7 @@ def readlog(logdir=None, filters=None):
     logdir = home + "data/logs/"
 
   loglist=[]
+  plist=[]
   for f in os.listdir(logdir):
     le = None
     d1 = None
@@ -181,6 +185,7 @@ def readlog(logdir=None, filters=None):
       continue
 
     # try to avoid logs not in filter criteria
+    q = mp.Queue()
     for afilter in filters:
       if afilter:
         if afilter.service and afilter.service not in f:
@@ -198,14 +203,25 @@ def readlog(logdir=None, filters=None):
           continue
 
       log.INFO("Processing %s" % logfile)
-      print "Processing %s with filter" % logfile
-      loglist.extend(read_one_logfile(logfile, afilter))
+      name = "Processing %s with filter" % logfile
+      print name
+      p = mp.Process(target=read_one_logfile, name=name, args=(q,logfile, afilter))
+      p.start()
+      #loglist.extend(read_one_logfile(logfile, afilter))
+      plist.append((p,q))
       break
 
+  while len(plist):
+    for p, q in plist:
+      if p.is_alive():
+        continue
+      print "Task \"%s\" exited with %s" % (p.name, p.exitcode)
+      loglist.extend(q.get())
+      p.join()
+      plist.remove((p, q))
   loglist.sort()
   return loglist
 
-#new
 def applyfilters(record, filters):
   ret = False
   for filter in filters:
