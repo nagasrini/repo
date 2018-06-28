@@ -164,8 +164,9 @@ def read_one_logfile(q, logfile, filter):
     #log.INFO("%s %s" % (le.service , le.date))
     if filter and applyfilters(le, [filter]):
       lelist.append(le)
+  print "%s: going to write" % logfile
   q.put(lelist)
-
+  print "%s: wrote" % logfile
 
 #pathre=r"(?P<service>^.*)\.[nN][tT][nN][xX].*\.log\..*\.(?P<date>\d+)-(?P<time>\d+).(?P<ddd>\d+)"
 pathre=r"^.*\.log.*\.(?P<date>\d+)-(?P<time>\d+)\.(?P<ddd>.*)"
@@ -213,12 +214,15 @@ def readlog(logdir=None, filters=None):
 
   while len(plist):
     for p, q in plist:
+      if not q.empty():
+        loglist.extend(q.get())
+        print "read from %s" % p.name
       if p.is_alive():
         continue
       print "Task \"%s\" exited with %s" % (p.name, p.exitcode)
-      loglist.extend(q.get())
       p.join()
       plist.remove((p, q))
+      del q
   loglist.sort()
   return loglist
 
