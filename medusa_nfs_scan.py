@@ -16,6 +16,7 @@ __all__ = [ "MedusaErrorStatus", "MedusaHelper" ]
 
 import cStringIO
 import time
+import re
 
 import sys
 sys.path.append('/home/nutanix/cluster/bin')
@@ -160,7 +161,7 @@ class MedusaHelper(object):
       arg.range.start_token = start_token
       # arg.range.count = 100 # Default
 
-      print "rpc", time.time()
+      #print "rpc", time.time()
       # Issue Cassandra RPC.
       try:
         rpc, getrange_slices_ret = self.__cassandra_client.GetRangeSlices(arg)
@@ -171,7 +172,7 @@ class MedusaHelper(object):
       if not getrange_slices_ret or len(getrange_slices_ret.range_slices) == 0:
         break
 
-      print "rpc end", time.time()
+      #print "rpc end", time.time()
       # Got results...
       for aCassandraKeySlice in getrange_slices_ret.range_slices:
         start_token = aCassandraKeySlice.key
@@ -200,11 +201,16 @@ class MedusaHelper(object):
     print("Scan found ", len(values)," Values")
     return values
 
+from zeus.zookeeper_session import ZookeeperSession
+from zeus.configuration import Configuration
+
 if __name__ == "__main__":
   log.initialize()
   mh = MedusaHelper()
 
-  from zeus.configuration import Configuration
+  zks = ZookeeperSession()
+  last_flushed = zks.get('/appliance/logical/stargate/nfs_namespace_last_flushed_walid')
+  valid_component_id_list = zks.list('/appliance/logical/clock')
   zcp=Configuration().initialize().config_proto()
   ctr_list = zcp.container_list
   ctr_dict={}
@@ -214,13 +220,38 @@ if __name__ == "__main__":
   nfsmaps = mh.scan(mh.kNFSMap, mh.kNFSMapCF)
   # Add the check here.
   for key, nfsmap in nfsmaps.iteritems():
+    invalid = False
     current_epoch =  ctr_dict[str(nfsmap.nfs_attr.container_id)].epoch
     inode_epoch = nfsmap.nfs_attr.inode_id.epoch
     #print nfsmap.nfs_attr
-    print "========="
-    print "%d: %d" % (current_epoch, inode_epoch)
-    print "========="
-    if current_epoch > inode_epoch:
+    if nfsmap.nfs_attr.prev_wal_id != -1 and nfsmap.nfs_attr.prev_wal_id > last_flushed or \
+       nfsmap.nfs_attr.wal_id != -1 and nfsmap.nfs_attr.wal_id > last_flushed:
       inode_id = nfsmap.nfs_attr.inode_id
-      print "DEBUG"
+      print "-------------------%d:%d:%d" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
+
+    if current_epoch > inode_epoch:
+      reason = ""
+      if inode_id.fsid == 0:
+        continue
+      for loc in nfsmap.nfs_attr.locs:
+        if str(loc.component_id) not in valid_component_id_list:
+          invalid = True
+          reason = "Component id %d not present" % loc.component_id
+          break
+        s = zks.get('/appliance/logical/clock/' + str(loc.component_id))
+        d = re.compile(r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)").match(s).groupdict()
+        
+        if d["inc_id"] < str(loc.incarnation_id) or (d["inc_id"] == str(loc.incarnation_id) and d["op_id"] < str(loc.operation_id)):
+          invalid = True
+          reason = "Either loc's incarnation_id or operation_id is greater: loc: %d:%d vs. %s:%s" % (loc.incarnation_id, loc.operation_id, d["inc_id"], d["op_id"])
+      if not invalid:
+        #print "%d:%d:%d\t%d-%d\t\t%d\t\t%s|%s
+        continue
+
+      print "========="
+      print "%d: %d" % (current_epoch, inode_epoch)
+      inode_id = nfsmap.nfs_attr.inode_id
+      print "%d:%d:%d" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
+      print "========="
+      print "DEBUG Reason: %s" % reason
       print nfsmap.nfs_attr
