@@ -224,9 +224,9 @@ if __name__ == "__main__":
     current_epoch =  ctr_dict[str(nfsmap.nfs_attr.container_id)].epoch
     inode_epoch = nfsmap.nfs_attr.inode_id.epoch
     #print nfsmap.nfs_attr
+    inode_id = nfsmap.nfs_attr.inode_id
     if nfsmap.nfs_attr.prev_wal_id != -1 and nfsmap.nfs_attr.prev_wal_id > last_flushed or \
        nfsmap.nfs_attr.wal_id != -1 and nfsmap.nfs_attr.wal_id > last_flushed:
-      inode_id = nfsmap.nfs_attr.inode_id
       print "-------------------%d:%d:%d" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
 
     if current_epoch > inode_epoch:

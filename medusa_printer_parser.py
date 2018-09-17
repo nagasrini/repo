@@ -6,6 +6,7 @@ import subprocess
 import medusa.medusa_printer_pb2 as medusa_printer_pb2
 from zeus.zookeeper_session import ZookeeperSession
 import util.base.command as command
+import re
 
 num_data_shards = 0
 
@@ -40,7 +41,8 @@ def read_nfs_map_to_file(inode_id, outputfile):
 
   return medusa_printer_proto
 
-def modify(medusa_printer_proto, debug_in_file, debug_out_file, inputfile):
+from zeus.configuration import Configuration
+def modify(medusa_printer_proto, debug_in_file, debug_out_file, inputfile, ctr_dict):
   '''
   modify the proto as per the condition and
   write it to a binary file for the consumption of medusa_printer --update
@@ -51,17 +53,32 @@ def modify(medusa_printer_proto, debug_in_file, debug_out_file, inputfile):
     open(debug_in_file, "w").write(str(medusa_printer_proto))
   col = medusa_printer_proto.rows[0].columns[0]
   entry = col.nfs_map_entry
+
+  current_epoch =  ctr_dict[str(entry.nfs_attr.container_id)].epoch
+  if current_epoch <= entry.nfs_attr.inode_id.epoch:
+    print "Not doing anything as inode's epoch is not older than that of container"
+    return
+
   if len(entry.nfs_attr.locs) == 1:
-    print "Has one loc"
+    print "Has one loc, needs a manual review"
   else:
     # check if the first loc has invalid component id.
     #print valid_component_id_list
+    zks = ZookeeperSession()
     for i, loc in enumerate(entry.nfs_attr.locs):
       if str(loc.component_id) not in valid_component_id_list:
-        print "removing loc with component_id %d at %d" % (loc.component_id, i)
+        print "  removing loc with component_id %d at %d" % (loc.component_id, i)
         del entry.nfs_attr.locs[i]
       else:
-        break
+        print "%s is in valid_component_list" % loc.component_id
+        # check for incarnation and operation ids
+        s = zks.get('/appliance/logical/clock/' + str(loc.component_id))
+        d = re.compile(r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)").match(s).groupdict()
+        if d["inc_id"] < str(loc.incarnation_id):
+          print "  removing loc with incarnation id %d higher than in zk %s" % (loc.incarnation_id, d["inc_id"])
+          del entry.nfs_attr.locs[i]
+        else:
+          print "  nothing to do with this loc"
 
   col.timestamp += 1
 
@@ -110,12 +127,18 @@ if __name__ == "__main__":
       sys.exit(1)
     list = [n.replace("\n", "") for n in f]
 
+  zcp=Configuration().initialize().config_proto()
+  ctr_list = zcp.container_list
+  ctr_dict={}
+  for ctr in zcp.container_list:
+    ctr_dict[str(ctr.container_id)] = ctr
+
   for inode_id in list:
     outputfile = "./inode_file_%s" % inode_id
     inputfile = "./inode_file_modified_%s" % inode_id
     debug_in_file = "./debug_proto_in_str_%s" % inode_id
     debug_out_file = "./debug_proto_out_str_%s" % inode_id
     proto = read_nfs_map_to_file(inode_id, outputfile)
-    ret = modify(proto, debug_in_file, debug_out_file, inputfile)
+    ret = modify(proto, debug_in_file, debug_out_file, inputfile, ctr_dict)
     if ret:
       execute(inputfile, inode_id, FLAGS.dry_run)
