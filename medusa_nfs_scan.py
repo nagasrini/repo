@@ -241,9 +241,12 @@ if __name__ == "__main__":
         s = zks.get('/appliance/logical/clock/' + str(loc.component_id))
         d = re.compile(r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)").match(s).groupdict()
         
-        if d["inc_id"] < str(loc.incarnation_id) or (d["inc_id"] == str(loc.incarnation_id) and d["op_id"] < str(loc.operation_id)):
+        if int(d["inc_id"]) < loc.incarnation_id :
           invalid = True
-          reason = "Either loc's incarnation_id or operation_id is greater: loc: %d:%d vs. %s:%s" % (loc.incarnation_id, loc.operation_id, d["inc_id"], d["op_id"])
+          reason = "The loc's incarnation_id is greater: loc: %d vs. %s" % (loc.incarnation_id, d["inc_id"])
+        elif int(d["inc_id"]) == loc.incarnation_id and int(d["op_id"]) < loc.operation_id:
+          invalid = True
+          reason = "The loc's operation_id is greater: %d vs. %s" % (loc.operation_id, d["op_id"])
       if not invalid:
         #print "%d:%d:%d\t%d-%d\t\t%d\t\t%s|%s
         continue

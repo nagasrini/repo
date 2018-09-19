@@ -65,20 +65,36 @@ def modify(medusa_printer_proto, debug_in_file, debug_out_file, inputfile, ctr_d
     # check if the first loc has invalid component id.
     #print valid_component_id_list
     zks = ZookeeperSession()
+    value_list = []
     for i, loc in enumerate(entry.nfs_attr.locs):
       if str(loc.component_id) not in valid_component_id_list:
         print "  removing loc with component_id %d at %d" % (loc.component_id, i)
-        del entry.nfs_attr.locs[i]
+        #del entry.nfs_attr.locs[i]
+        value_list.append(entry.nfs_attr.locs[i])
       else:
         print "%s is in valid_component_list" % loc.component_id
         # check for incarnation and operation ids
         s = zks.get('/appliance/logical/clock/' + str(loc.component_id))
         d = re.compile(r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)").match(s).groupdict()
-        if d["inc_id"] < str(loc.incarnation_id):
+        if int(d["inc_id"]) < loc.incarnation_id:
           print "  removing loc with incarnation id %d higher than in zk %s" % (loc.incarnation_id, d["inc_id"])
-          del entry.nfs_attr.locs[i]
+          #del entry.nfs_attr.locs[i]
+          value_list.append(entry.nfs_attr.locs[i])
         else:
           print "  nothing to do with this loc"
+
+    if not len(value_list):
+      print "removing none"
+      return False
+    if len(value_list) == len(entry.nfs_attr.locs):
+      print "would remove all locs"
+      print "ignoring the op"
+      return False
+    print "removing %d locs" % len(value_list)
+    for val in value_list:
+      entry.nfs_attr.locs.remove(val)
+
+    print "resulting locs of size %d" % len(entry.nfs_attr.locs)
 
   col.timestamp += 1
 
