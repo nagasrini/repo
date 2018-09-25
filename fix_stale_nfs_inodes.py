@@ -204,6 +204,13 @@ class MedusaHelper(object):
     print("Scan found ", len(values)," Values")
     return values
 
+
+# Author: nagaraj@nutanix.com
+#
+# This part uses the MedusaHelper module to walk nfs attr append
+# check each inode for criteria that describes the stale inode
+# and fixes the inode's stale locs before updating the medusa metadata back.
+#
 from zeus.zookeeper_session import ZookeeperSession
 from zeus.configuration import Configuration
 
@@ -367,6 +374,7 @@ if __name__ == "__main__":
     if nfsmap.nfs_attr.prev_wal_id != -1 and nfsmap.nfs_attr.prev_wal_id > last_flushed or \
        nfsmap.nfs_attr.wal_id != -1 and nfsmap.nfs_attr.wal_id > last_flushed:
       print "inode %d:%d:%d has wal-id greater than last flushed wal-id" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
+      print "zk\'s last_flushed_wal_id %s inode\'s wal_id %d, prev_wal_id %d" % (last_flushed, nfsmap.nfs_attr.wal_id, nfsmap.nfs_attr.prev_wal_id)
 
     component_dict = zk_dict["component_dict"]
     if current_epoch > inode_id.epoch:
