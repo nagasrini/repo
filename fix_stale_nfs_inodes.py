@@ -27,7 +27,13 @@ import medusa.medusa_printer_pb2 as medusa_printer_pb2
 import util.base.command as command
 
 from medusa import medusa_pb2
-import util.base.log as log
+from medusa.medusa_pb2 import MedusaNFSMapEntryProto
+from medusa.medusa_pb2 import MedusaExtentGroupIdMapEntryProto
+try:
+  # 5.9 code has kVDiskBlockMap in different location
+  from medusa.medusa_pb2 import MedusaVDiskBlockMapEntryProto
+except:
+  from medusa.vdisk_block_map_pb2 import MedusaVDiskBlockMapEntryProto
 try:
   ## 5.5 code has client here.
   from cassandra.cassandra_client import cassandra_pb2
@@ -35,8 +41,9 @@ try:
 except:
   from util.cassandra import cassandra_pb2
   from util.cassandra.client import CassandraClient, CassandraClientError
+from alerts.manager.alert_pb2 import AlertProto
 
-from alerts.manager import alert_pb2
+import util.base.log as log
 
 gflags.DEFINE_integer("nfs_map_lookup_batch_size",
                       64,
@@ -109,10 +116,10 @@ class MedusaHelper(object):
   kAlertsCF = "alerts_cf"
 
   keyspace_to_proto_map = {
-                        kNFSMap:medusa_pb2.MedusaNFSMapEntryProto,
-                        kVDiskBlockMap:medusa_pb2.MedusaVDiskBlockMapEntryProto,
-                        kEGIDMap:medusa_pb2.MedusaExtentGroupIdMapEntryProto,
-                        kAlertsMap:alert_pb2.AlertProto}
+                        kNFSMap:MedusaNFSMapEntryProto,
+                        kVDiskBlockMap:MedusaVDiskBlockMapEntryProto,
+                        kEGIDMap:MedusaExtentGroupIdMapEntryProto,
+                        kAlertsMap:AlertProto}
 
 
   # Cassandra token hash constants.
@@ -219,6 +226,7 @@ gflags.DEFINE_string("inode_id_file", "", "File containing nfs inode_ids one per
 gflags.DEFINE_boolean("dry_run", True, "If Update is a Dry Run?")
 gflags.DEFINE_boolean("fix", False, "Try fixing the stale inodes, if false, just print")
 gflags.DEFINE_integer("fs_id", 0, "fs_id part of inode to filter")
+gflags.DEFINE_boolean("fix_single_loc", False, "fix single loc; Expert Mode!")
 
 FLAGS = gflags.FLAGS
 
@@ -230,7 +238,7 @@ def process(inode_id, zk_dict):
   cmd = "medusa_printer --lookup nfs --nfs_inode_id %s --save_to_file " \
         "--output_file %s --serialization_format=binary" % (inode_id, outputfile)
   #print cmd
-  print "##Processing inode %s" % inode_id
+  print "## Processing inode %s" % inode_id
 
   rv, out, err = command.timed_command(cmd, 60)
   if rv:
@@ -248,7 +256,7 @@ def process(inode_id, zk_dict):
 
   ret = modify_proto(medusa_printer_proto, inputfile, zk_dict)
   if not ret:
-    print "##couldn't modify proto"
+    print "## couldn't modify proto for %s" % inode_id
     return
   cmd = "medusa_printer --lookup nfs --nfs_inode_id %s " \
         "--input_file %s --serialization_format=binary " \
@@ -295,14 +303,14 @@ def modify_proto(medusa_proto, inputfile, zk_dict):
   for i, loc in enumerate(entry.nfs_attr.locs):
     if str(loc.component_id) not in component_dict.keys():
       print "  removing loc with component_id %d at %d" % (loc.component_id, i)
-      rm_loc_list.append(entry.nfs_attr.locs[i])
+      rm_loc_list.append(i)
     else:
       # check for incarnation and operation ids
       print "%s is in valid_component_list" % loc.component_id
       inc_id, op_id = zk_dict["component_dict"][str(loc.component_id)]
       if inc_id < loc.incarnation_id:
         print "  removing loc with incarnation id %d higher than in zk %d" % (loc.incarnation_id, inc_id)
-        rm_loc_list.append(entry.nfs_attr.locs[i])
+        rm_loc_list.append(i)
       else:
         print "  nothing to do with this loc"
         print "  inodes incarnation_id:operation_id : %16d:%16d" % (loc.incarnation_id, loc.operation_id)
@@ -311,12 +319,21 @@ def modify_proto(medusa_proto, inputfile, zk_dict):
   if not len(rm_loc_list):
     print "removing none; ignoring this inode"
     return False
+
   if len(rm_loc_list) == len(entry.nfs_attr.locs):
-    print "would remove all locs; ignoring this inode"
-    return False
-  print "removing %d locs" % len(rm_loc_list)
-  for loc in rm_loc_list:
-    entry.nfs_attr.locs.remove(loc)
+    if not FLAGS.fix_single_loc:
+      print "would remove all locs; ignoring this inode"
+      return False
+
+  print "removing or fixing %d locs" % len(rm_loc_list)
+  for idx in rm_loc_list.__reversed__():
+    loc = entry_nfs_attr.locs[i]
+    if inc_id < loc.incarnation_id:
+      # fix loc
+      loc.inc_id = inc_id - 1
+    else:
+      # remove loc
+      entry.nfs_attr.locs.remove(loc)
 
   print "resulting locs of size %d" % len(entry.nfs_attr.locs)
 
@@ -333,9 +350,12 @@ def modify_proto(medusa_proto, inputfile, zk_dict):
   return True
 
 def get_zk_data():
+  component_zkpath = '/appliance/logical/clock'
+  wal_zkpath = '/appliance/logical/stargate/nfs_namespace_last_flushed_walid'
+  component_re = r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)"
   zk_dict={}
   zks = ZookeeperSession()
-  valid_component_id_list = zks.list('/appliance/logical/clock')
+  valid_component_id_list = zks.list(component_zkpath)
   if not len(valid_component_id_list):
     print "Couldn't get component ids"
     sys.exit(0)
@@ -347,12 +367,12 @@ def get_zk_data():
   zk_dict["ctr_dict"] = ctr_dict
   component_dict = {}
   for comp_id in valid_component_id_list:
-    s = zks.get('/appliance/logical/clock/' + comp_id)
-    re_pattern = re.compile(r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)")
+    s = zks.get(component_zkpath + '/' + comp_id)
+    re_pattern = re.compile(component_re)
     d = re_pattern.match(s).groupdict()
     component_dict[comp_id] = (int(d["inc_id"]), int(d["op_id"]))
   zk_dict["component_dict"] = component_dict
-  last_flushed = zks.get('/appliance/logical/stargate/nfs_namespace_last_flushed_walid')
+  last_flushed = zks.get(wal_zkpath)
   zk_dict["last_flushed"] = int(last_flushed)
   return zk_dict
 
@@ -363,50 +383,92 @@ if __name__ == "__main__":
   zk_dict=get_zk_data()
   nfsmaps = mh.scan(mh.kNFSMap, mh.kNFSMapCF)
   inode_list = []
+  total_viewed = 0
+  total_skipped = 0
+  total_invalid = 0
+  total_walid = 0
+  total_snaps = 0
+  total_invalid_comp = 0
+  total_invalid_incarnation = 0
+  total_invalid_operation = 0
+  total_invalid_single_loc = 0
   for key, nfsmap in nfsmaps.iteritems():
+    total_viewed += 1
     invalid = False
     ctr_dict = zk_dict["ctr_dict"]
-    current_epoch = ctr_dict[str(nfsmap.nfs_attr.container_id)].epoch
+    curr_epoch = ctr_dict[str(nfsmap.nfs_attr.container_id)].epoch
     inode_id = nfsmap.nfs_attr.inode_id
     if FLAGS.fs_id and FLAGS.fs_id != inode_id.fsid:
+      total_skipped += 1
       continue
-    last_flushed = zk_dict["last_flushed"]
-    if nfsmap.nfs_attr.prev_wal_id != -1 and nfsmap.nfs_attr.prev_wal_id > last_flushed or \
-       nfsmap.nfs_attr.wal_id != -1 and nfsmap.nfs_attr.wal_id > last_flushed:
-      print "inode %d:%d:%d has wal-id greater than last flushed wal-id" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
-      print "zk\'s last_flushed_wal_id %s inode\'s wal_id %d, prev_wal_id %d" % (last_flushed, nfsmap.nfs_attr.wal_id, nfsmap.nfs_attr.prev_wal_id)
 
     component_dict = zk_dict["component_dict"]
-    if current_epoch > inode_id.epoch:
+    total_skipped += 1
+    if curr_epoch > inode_id.epoch:
       reason = ""
       # we don't validate snapshots
       if inode_id.fsid == 0:
+        total_snaps += 1
         continue
+      total_skipped -= 1
+      last_flushed = zk_dict["last_flushed"]
+      prev_wal_id = nfsmap.nfs_attr.prev_wal_id
+      wal_id = nfsmap.nfs_attr.wal_id
+      inode_str = "%d:%d:%d" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
+      if prev_wal_id != -1 and prev_wal_id > last_flushed or \
+        wal_id != -1 and wal_id > last_flushed:
+        # we allow 10,000 unflushed transactions in the WAL
+        print "inode %s has wal-id greater than last flushed wal-id" % inode_str
+        print "zk\'s last_flushed_wal_id %s inode\'s wal_id %d, prev_wal_id %d" % (last_flushed, wal_id, prev_wal_id)
+        print "need manual review of this inode"
+        total_walid += 1
+        continue
+
       for loc in nfsmap.nfs_attr.locs:
         if str(loc.component_id) not in component_dict.keys():
           invalid = True
           reason = "Component id %d not present" % loc.component_id
+          total_invalid += 1
+          total_invalid_comp += 1
           break
         inc_id, op_id = zk_dict["component_dict"][str(loc.component_id)]
         if inc_id < loc.incarnation_id :
           invalid = True
           reason = "The loc's incarnation_id is greater: loc: %d vs. %d" % (loc.incarnation_id, inc_id)
+          total_invalid += 1
+          total_invalid_incarnation += 1
         elif inc_id == loc.incarnation_id and op_id < loc.operation_id:
           invalid = True
           reason = "The loc's operation_id is greater: %d vs. %d" % (loc.operation_id, op_id)
+          total_invalid += 1
+          total_invalid_operation += 1
+
+      # this is to consider single stale loc that needs to be removed.
+      # if we have multiple locs and all stale, we still need manual fixing.
+      if invalid and len(nfsmap.nfs_attr.locs) == 1:
+        total_invalid_single_loc += 1
+        reason += " and there is only one loc in the inode."
+
       if not invalid:
-        #print "%d:%d:%d\t%d-%d\t\t%d\t\t%s|%s
         continue
 
       if not FLAGS.fix:
         print "========="
-        print "current epoch %d : inode_epoch %d" % (current_epoch, inode_id.epoch)
-        print "Stale inode: %d:%d:%d" % (inode_id.fsid, inode_id.epoch, inode_id.fid)
+        print "current epoch %d : inode_epoch %d" % (curr_epoch, inode_id.epoch)
+        print "Stale inode: %s" % (inode_str)
         print "========="
         print "DEBUG Reason: %s" % reason
         print nfsmap.nfs_attr
-      inode_list.append("%d:%d:%d" % (inode_id.fsid, inode_id.epoch, inode_id.fid))
+      inode_list.append(inode_str)
 
+  print "total_viewed: %d" % total_viewed
+  print "total_skipped: %d" % total_skipped
+  print "total_invalid: %d -- total_invalid_comp: %d; total_invalid_operation: %d;" \
+    " total_invalid_incarnation: %d" % (total_invalid, total_invalid_comp, \
+    total_invalid_operation, total_invalid_incarnation)
+  print "total_walid: %d" % total_viewed
+  print "total_invalid_single_loc: %d" % total_invalid_single_loc
+  print "total_snaps: %d" % total_snaps
   if not FLAGS.fix:
     sys.exit(0)
 
