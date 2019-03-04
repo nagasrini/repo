@@ -10,6 +10,9 @@ import os
 import sys
 import time
 import requests
+import urllib
+import re
+from lxml import etree
 for path in os.listdir("/usr/local/nutanix/lib/py"):
         sys.path.insert(0, os.path.join("/usr/local/nutanix/lib/py", path))
 import gflags
@@ -44,7 +47,7 @@ def get_cerebro_master():
   return ret.master_handle
 
 class Replication():
-  def __init__(pd, remote, dump_dir):
+  def __init__(self, pd, remote, dump_dir):
     self.pd = pd
     self.remote = remote
     self.dump_dir = dump_dir
@@ -52,8 +55,11 @@ class Replication():
     self.metaop_page = ""
     self.replicate_op_page_vec = []
     self.get_repl_metaop_id(pd, remote)
+    self.state_cell_str = u""
+    self.slave_info = []
+    self.timeout = 60
 
-  def get_repl_metaop_id(name, rem):
+  def get_repl_metaop_id(self, name, rem):
     '''
     returns ongoing replication metaop_id for the PD to the remote
     '''
@@ -71,13 +77,15 @@ class Replication():
       if exec_op.base_persistent_state.opcode == op_state.Opcode.Value("kReplicateMetaOp"):
         for repl in exec_op.base_persistent_state.reference_actions.replication:
           if repl.remote_name == rem:
-            self.meta_opid = exec_op.meta_opid
+            self.metaop_id = exec_op.meta_opid
+            print "found"
             break
 
-  def dump_to_file(self, path, data_bytes, convert=True):
+  def dump_to_file(self, path, convert=True):
     '''
     Truncate a file and dump the data
     '''
+    data_bytes = self.text
     l = len(data_bytes)
     flags = os.O_CREAT|os.O_RDWR|os.O_TRUNC
     fd = os.open(path, flags)
@@ -92,28 +100,70 @@ class Replication():
       return
     fd = os.open(txt_path, flags)
     res_l = os.write(fd, txt_data_bytes)
-    if not res_l = len(txt_data_bytes):
+    if not res_l == len(txt_data_bytes):
       log.WARNING("couldn't dump to %s path completely" % txt_path)
     os.close(fd)
 
+
+  def replicate_parse(self):
+    '''
+    Parse replicate meta op table
+    '''
+    html = etree.HTML(self.text)
+    tvec = html.xpath('//table/tr')
+    wd_table = []
+    for i, tr in enumerate(tvec):
+      if len(tr) and tr[0].text:
+        if "base" in tr[0].text:
+          # base { has only one column
+          for line in tr[0].itertext():
+            self.state_cell_str += line.replace(u'\u00a0', ' ') + '\n'
+        elif "Distribution" in tr[0].text:
+          # this row is from Work Distrubution table
+          wd_table = tr.getparent()
+          break
+
+    pat=r' work_id: (\d+)\n.*slave_incarnation_id: (\d+)\n.*file_path: "(\S+)"'
+    mgroup = re.findall(pat, self.state_cell_str, re.M)
+    for tr in wd_table:
+      print "len %s" % len(wd_table)
+      if "Work" in tr[0].text or "File" in tr[0].text:
+        continue # two headers of the table
+      si = {}
+      si['file'] = tr[0].text
+      for match in mgroup:
+        if si['file'] in match:
+          si['work_id'] = match[0]
+          si['slave id'] = match[1]
+      si['cg'] = tr[1].text
+      si['type'] = tr[2].text
+      si['slave IP'] = tr[3][0].text #hlink
+      self.slave_info.append(si)
+      print self.slave_info
+
+
   def get_metaop_data(self):
-    url="http://%s/?pd=%s&op=%d" % (ip,pd,metaop_id)
     ip = get_cerebro_master()
+    url="http://%s/?pd=%s&op=%d" % (ip,self.pd,self.metaop_id)
     params={'timeout': self.timeout}
     ret = requests.get(url, params=params)
-    if not ret.ok:
-      return None, None
-    self.metaop_page = dump_dir + "/%d_replicate_metaop" % metaop_id
+    web = urllib.urlopen(url)
+    if web.getcode() != 200:
+      print "ERROR: couldn't get the page"
+      return None
+    self.text = web.read()
+    self.metaop_page = self.dump_dir + "/%d_replicate_metaop" % self.metaop_id
     file_path = self.metaop_page + ".html"
-    dump_to_file(file_path, ret.text, convert=True)
+    self.dump_to_file(file_path, convert=True)
+    self.replicate_parse()
     return ret
 
   def get_slave_ops(self):
     if not os.lexists(self.metaop_page + ".txt"):
       print "ERROR: text metaop page doesn't exist"
       return
-    filter = " work_id|slave_incarnation_id| file_path"
-    cmd "/usr/bin/egrep -e '%s' %s.txt" % (filter,self.metaop_page)
+    filter1 = " work_id|slave_incarnation_id| file_path"
+    cmd = "/usr/bin/egrep -e '%s' %s.txt" % (filter1,self.metaop_page)
     rv, data, err = command.timed_command(cmd, 60)
     if rv:
       print err
@@ -131,8 +181,5 @@ if __name__ == "__main__":
       if not os.path.isdir(FLAGS.dump_dir):
         print "ERROR: %s is not a directory, exiting"
         sys.exit(1)
-  if not ip:
-    print "ERROR: ip"
-    sys.exit(3)
   rep = Replication(pd, remote, dump_dir)
   repl = rep.get_metaop_data()
