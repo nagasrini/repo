@@ -68,6 +68,7 @@ class Replication():
     ret = QueryProtectionDomainRet()
     arg.protection_domain_name = name
     arg.fetch_executing_meta_ops = True
+    arg.list_snapshot_handles.CopyFrom(QueryProtectionDomainArg.ListSnapshotHandles())
     try:
       ret = RpcClient.query_protection_domain(arg)
     except CerebroInterfaceError as e:
@@ -78,8 +79,12 @@ class Replication():
         for repl in exec_op.base_persistent_state.reference_actions.replication:
           if repl.remote_name == rem:
             self.metaop_id = exec_op.meta_opid
+            self.snap_handle = repl.snapshot_handle_vec
+            if repl.reference_snapshot_handle_vec:
+              self.ref_snap_handle = repl.snapshot_handle_vec
             print "found"
             break
+
 
   def dump_to_file(self, path, convert=True):
     '''
@@ -104,8 +109,7 @@ class Replication():
       log.WARNING("couldn't dump to %s path completely" % txt_path)
     os.close(fd)
 
-
-  def replicate_parse(self):
+  def parse_replicate_metaop(self):
     '''
     Parse replicate meta op table
     '''
@@ -123,8 +127,14 @@ class Replication():
           wd_table = tr.getparent()
           break
 
-    pat=r' work_id: (\d+)\n.*slave_incarnation_id: (\d+)\n.*file_path: "(\S+)"'
-    mgroup = re.findall(pat, self.state_cell_str, re.M)
+    # r=r'work_descriptor_vec \{[^}]+\}'
+    # re.findall(r' .*: (.*)\n', ss, re.M)
+    # re.findall(r'.*(\bwork_descriptor_vec |\bwork_id|\bfile_path|\bslave_incarnation_id|\bfile_vdisk_id|\breference_file_vdisk_id)(.*)\n', sstr, re.M)
+    mgroup = re.findall(r' *(\bwork_id|\bfile_path|\bslave_incarnation_id|\bfile_vdisk_id): \"*(.*)\n\"*', ss, re.M)
+    #pat1=r' work_id: (\d+)\n.*slave_incarnation_id: (\d+)\n.*file_path: "(\S+)"'
+    #mgroup1 = re.findall(pat, self.state_cell_str, re.M)
+    rrplication = ReplicateMetaOpCkptStateProto()
+    _ = text_format.Merge(re.findall(r'\{\n (.*)\n.*\}', sstr, re.M|re.S)[0],r)
     for tr in wd_table:
       print "len %s" % len(wd_table)
       if "Work" in tr[0].text or "File" in tr[0].text:
@@ -132,7 +142,7 @@ class Replication():
       si = {}
       si['file'] = tr[0].text
       for match in mgroup:
-        if si['file'] in match:
+        if si['file'] in match[1]:
           si['work_id'] = match[0]
           si['slave id'] = match[1]
       si['cg'] = tr[1].text
@@ -140,7 +150,6 @@ class Replication():
       si['slave IP'] = tr[3][0].text #hlink
       self.slave_info.append(si)
       print self.slave_info
-
 
   def get_metaop_data(self):
     ip = get_cerebro_master()
@@ -155,9 +164,17 @@ class Replication():
     self.metaop_page = self.dump_dir + "/%d_replicate_metaop" % self.metaop_id
     file_path = self.metaop_page + ".html"
     self.dump_to_file(file_path, convert=True)
-    self.replicate_parse()
+    self.parse_replicate_metaop()
     return ret
 
+  def get_replicate_file_op_data(self):
+    if len(self.slave_info):
+      for si in self.slave_info:
+        wid = si['work_id']
+        ip = si['slave IP']
+
+
+'''
   def get_slave_ops(self):
     if not os.lexists(self.metaop_page + ".txt"):
       print "ERROR: text metaop page doesn't exist"
@@ -168,6 +185,7 @@ class Replication():
     if rv:
       print err
       return
+'''
 
 if __name__ == "__main__":
   argv = FLAGS(sys.argv)
