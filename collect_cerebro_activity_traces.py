@@ -23,8 +23,13 @@ from util.base.types import NutanixUuid
 from util.misc.protobuf import pb2json
 from util.nfs.nfs_client import NfsClient, NfsError
 from cerebro.master.persistent_op_state_pb2 import PersistentOpBaseStateProto as op_state
+from cerebro.master.persistent_op_state_pb2 import PersistentOpStateProto as Pstate
 import util.base.command as command
 import util.base.log as log
+
+import google.protobuf.text_format as text_format
+
+from prettytable import PrettyTable
 
 gflags.DEFINE_string("pd", "", "pd name")
 gflags.DEFINE_string("remote", "", "remote name")
@@ -52,18 +57,16 @@ class Replication():
     self.remote = remote
     self.dump_dir = dump_dir
     self.metaop_id = 0
-    self.metaop_page = ""
-    self.replicate_op_page_vec = []
+    self.metaop_page_txt = ""
+    self.replicate_file_op_page_txt_vec = []
     self.get_repl_metaop_id(pd, remote)
     self.state_cell_str = u""
     self.slave_info = []
-    self.timeout = 60
 
   def get_repl_metaop_id(self, name, rem):
     '''
     returns ongoing replication metaop_id for the PD to the remote
     '''
-    print "pd=%s remtoe=%s" % (name, rem)
     arg = QueryProtectionDomainArg()
     ret = QueryProtectionDomainRet()
     arg.protection_domain_name = name
@@ -79,18 +82,19 @@ class Replication():
         for repl in exec_op.base_persistent_state.reference_actions.replication:
           if repl.remote_name == rem:
             self.metaop_id = exec_op.meta_opid
-            self.snap_handle = repl.snapshot_handle_vec
-            if repl.reference_snapshot_handle_vec:
-              self.ref_snap_handle = repl.snapshot_handle_vec
-            print "found"
+            self.snap_handle = repl.snapshot_handle_vec[0]
+            if repl.reference_snapshot_handle:
+              self.ref_snap_handle = repl.reference_snapshot_handle
             break
+  def get_slave_dump_path(self, comp, ip):
+    fname = "%s_" % self.metaop_id + ip.replace('.', '_') + "_%s" % comp
+    return self.dump_dir + fname
 
 
-  def dump_to_file(self, path, convert=True):
+  def dump_to_file(self, path, data_bytes, convert=True):
     '''
     Truncate a file and dump the data
     '''
-    data_bytes = self.text
     l = len(data_bytes)
     flags = os.O_CREAT|os.O_RDWR|os.O_TRUNC
     fd = os.open(path, flags)
@@ -98,6 +102,8 @@ class Replication():
     if not res_l == len(data_bytes):
       log.WARNING("couldn't dump to %s path completely" % path)
     os.close(fd)
+    if not convert:
+      return
     txt_path = path.split('.')[0]+".txt"
     cmd = "/usr/bin/links -dump %s" % path
     rv, txt_data_bytes, _ = command.timed_command(cmd, 60)
@@ -113,7 +119,7 @@ class Replication():
     '''
     Parse replicate meta op table
     '''
-    html = etree.HTML(self.text)
+    html = etree.HTML(self.metaop_page_txt)
     tvec = html.xpath('//table/tr')
     wd_table = []
     for i, tr in enumerate(tvec):
@@ -127,65 +133,92 @@ class Replication():
           wd_table = tr.getparent()
           break
 
-    # r=r'work_descriptor_vec \{[^}]+\}'
-    # re.findall(r' .*: (.*)\n', ss, re.M)
-    # re.findall(r'.*(\bwork_descriptor_vec |\bwork_id|\bfile_path|\bslave_incarnation_id|\bfile_vdisk_id|\breference_file_vdisk_id)(.*)\n', sstr, re.M)
-    mgroup = re.findall(r' *(\bwork_id|\bfile_path|\bslave_incarnation_id|\bfile_vdisk_id): \"*(.*)\n\"*', ss, re.M)
-    #pat1=r' work_id: (\d+)\n.*slave_incarnation_id: (\d+)\n.*file_path: "(\S+)"'
-    #mgroup1 = re.findall(pat, self.state_cell_str, re.M)
-    rrplication = ReplicateMetaOpCkptStateProto()
-    _ = text_format.Merge(re.findall(r'\{\n (.*)\n.*\}', sstr, re.M|re.S)[0],r)
+    pstate = Pstate()
+    _ = text_format.Merge(self.state_cell_str, pstate)
+
     for tr in wd_table:
       print "len %s" % len(wd_table)
       if "Work" in tr[0].text or "File" in tr[0].text:
         continue # two headers of the table
       si = {}
       si['file'] = tr[0].text
-      for match in mgroup:
-        if si['file'] in match[1]:
-          si['work_id'] = match[0]
-          si['slave id'] = match[1]
+      for wd in pstate.replicate.work_descriptor_vec:
+        if si['file'] in wd.file_path:
+          si['work_id'] = wd.work_id
+          si['slave id'] = wd.slave_incarnation_id
+          si['file_vdisk_id'] = wd.file_vdisk_id
+          si['ref_file_vdisk_id'] = wd.reference_file_vdisk_id
       si['cg'] = tr[1].text
       si['type'] = tr[2].text
-      si['slave IP'] = tr[3][0].text #hlink
+      si['slave IP'] = tr[3][0].text.split(':')[0] #hlink
       self.slave_info.append(si)
       print self.slave_info
 
   def get_metaop_data(self):
     ip = get_cerebro_master()
     url="http://%s/?pd=%s&op=%d" % (ip,self.pd,self.metaop_id)
-    params={'timeout': self.timeout}
-    ret = requests.get(url, params=params)
     web = urllib.urlopen(url)
     if web.getcode() != 200:
       print "ERROR: couldn't get the page"
       return None
-    self.text = web.read()
+    self.metaop_page_txt = web.read()
     self.metaop_page = self.dump_dir + "/%d_replicate_metaop" % self.metaop_id
     file_path = self.metaop_page + ".html"
-    self.dump_to_file(file_path, convert=True)
+    self.dump_to_file(file_path, self.metaop_page_txt, convert=True)
     self.parse_replicate_metaop()
-    return ret
 
-  def get_replicate_file_op_data(self):
+
+  def get_replication_summary(self):
+    summary = "Summary of replication of PD %s to Remote Site %s\n" % \
+      (self.pd, self.remote)
+    summary += "\tMetaop Op Id: %d\n" % self.metaop_id
+
+    for si in self.slave_info:
+      summary += '\t\twork id           : %s\n' % si['work_id']
+      summary += '\t\tslave IP          : %s\n' % si['slave IP']
+      summary += '\t\tSlave inc ID      : %d\n' % si['slave id']
+      summary += '\t\tFile Path         : %s\n' % si['file']
+      summary += '\t\tFile Vdisk ID     : %s\n' % si['file_vdisk_id']
+      summary += '\t\tRef. File Vdisk ID: %s\n' % si['ref_file_vdisk_id']
+      summary += '\n'
+    else:
+      summary += "\nNo Slaves Found"
+
+    self.summary = summary
+    file_path = self.dump_dir + "replication_summary.txt"
+    self.dump_to_file(file_path, summary, convert=False)
+
+  def get_slave_op_data(self):
     if len(self.slave_info):
-      for si in self.slave_info:
-        wid = si['work_id']
-        ip = si['slave IP']
+      ipl = list(set([si.get('slave IP', None) for si in self.slave_info]))
+      for ip in ipl:
+        url="http://%s:2020/h/traces?c=cerebro_slave&expand=" % ip
+        web = urllib.urlopen(url)
+        if web.getcode() != 200:
+          print "ERROR: couldn't get the page"
+          continue
+        path = self.get_slave_dump_path("cerebro_slave", ip)
+        data = web.read()
+        self.replicate_file_op_page_txt_vec.append(data)
+        self.dump_to_file(path + '.html', data, convert=True)
 
+        # c=vdisk_controller&a=completed&regex=VDiskMicroCerebroReplicateOp
+        url='http://%s:2009/h/traces?c=vdisk_controller&' % ip
+        vdisk_ext_read_ext = "low=256&a=completed&regex=VDiskMicroReadExtentsOp&expand="
+        web = urllib.urlopen(url + vdisk_ext_read_ext)
+        if web.getcode() != 200:
+          print "ERROR: couldn't get the page"
+          continue
+        path = self.get_slave_dump_path("vdisk_read_extent", ip)
+        self.dump_to_file(path + '.html', data, convert=True)
 
-'''
-  def get_slave_ops(self):
-    if not os.lexists(self.metaop_page + ".txt"):
-      print "ERROR: text metaop page doesn't exist"
-      return
-    filter1 = " work_id|slave_incarnation_id| file_path"
-    cmd = "/usr/bin/egrep -e '%s' %s.txt" % (filter1,self.metaop_page)
-    rv, data, err = command.timed_command(cmd, 60)
-    if rv:
-      print err
-      return
-'''
+        vdisk_replicate_ext = "low=256&a=completed&regex=VDiskMicroCerebroReplicateOp"
+        web = urllib.urlopen(url + vdisk_replicate_ext)
+        if web.getcode() != 200:
+          print "ERROR: couldn't get the page"
+          continue
+        path = self.get_slave_dump_path("vdisk_replicate", ip)
+        self.dump_to_file(path + '.html', data, convert=True)
 
 if __name__ == "__main__":
   argv = FLAGS(sys.argv)
@@ -199,5 +232,7 @@ if __name__ == "__main__":
       if not os.path.isdir(FLAGS.dump_dir):
         print "ERROR: %s is not a directory, exiting"
         sys.exit(1)
-  rep = Replication(pd, remote, dump_dir)
-  repl = rep.get_metaop_data()
+  rep = Replication(pd, remote, FLAGS.dump_dir)
+  rep.get_metaop_data()
+  rep.get_slave_op_data()
+  rep.get_replication_summary()
