@@ -86,8 +86,10 @@ class Replication():
             if repl.reference_snapshot_handle:
               self.ref_snap_handle = repl.reference_snapshot_handle
             break
-  def get_slave_dump_path(self, comp, ip):
+  def get_slave_dump_path(self, comp, ip, add_ts=False):
     fname = "%s_" % self.metaop_id + ip.replace('.', '_') + "_%s" % comp
+    if add_ts:
+      fname += time.strftime("_%Y%m%d_%H%M%S")
     return self.dump_dir + fname
 
 
@@ -181,13 +183,20 @@ class Replication():
       summary += '\t\tFile Vdisk ID     : %s\n' % si['file_vdisk_id']
       summary += '\t\tRef. File Vdisk ID: %s\n' % si['ref_file_vdisk_id']
       summary += '\n'
-    else:
+
+    if not len(self.slave_info):
       summary += "\nNo Slaves Found"
 
     self.summary = summary
     file_path = self.dump_dir + "replication_summary.txt"
     self.dump_to_file(file_path, summary, convert=False)
 
+  # stargate_slave_data = {"port": 2009, "c"="vdisk_controller", low=256, regex=["VDiskMicroReadExtentsOp", "VDiskMicroCerebroReplicateOp"]}
+  # stargate_replicate_latency {"url": "http:0:2009/latency/replicate_stats"}
+  # cerebro_slave_data = {"port": 2020, "c"="cerebro_slave", low=256}
+
+  #   . http://0:2009/replication_stats?work_id=567028 with work_id
+  #   . http://0:2009/latency/replicate_stats?id=567028
   def get_slave_op_data(self):
     if len(self.slave_info):
       ipl = list(set([si.get('slave IP', None) for si in self.slave_info]))
