@@ -1,0 +1,25 @@
+# A list of dictionaries defining parameters for pages. Can had list of regexes.
+[
+{
+  port: 2009,
+  c: vdisk_controller,
+  low: 256,
+  regex: [
+    "VDiskMicroReadExtentsOp",
+    "VDiskMicroCerebroReplicateOp"
+  ]
+},
+{
+  port: 2009,
+  url: "latency/replicate_stats"
+},
+{
+  port: 2009,
+  url: "replication_stats"
+}
+{
+  port: 2020,
+  c: "cerebro_slave",
+  low: 256
+}
+]

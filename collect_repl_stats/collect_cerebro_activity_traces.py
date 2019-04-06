@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import requests
-import urllib
+import urllib2
 import re
 from lxml import etree
 for path in os.listdir("/usr/local/nutanix/lib/py"):
@@ -39,6 +39,10 @@ FLAGS = gflags.FLAGS
 
 RpcClient = CerebroInterfaceTool()
 
+default_policies = [
+
+]
+
 def get_cerebro_master():
   '''
   gets cerebro master handle
@@ -52,16 +56,23 @@ def get_cerebro_master():
   return ret.master_handle
 
 class Replication():
-  def __init__(self, pd, remote, dump_dir):
+  def __init__(self, pd, remote, dump_dir, policy_path="./policy.json"):
     self.pd = pd
     self.remote = remote
     self.dump_dir = dump_dir
     self.metaop_id = 0
     self.metaop_page_txt = ""
+    self.policies = []
     self.replicate_file_op_page_txt_vec = []
+    self.load_policies(policy_path)
     self.get_repl_metaop_id(pd, remote)
     self.state_cell_str = u""
     self.slave_info = []
+
+  def load_policies(self, path):
+    if os.path.isfile(path):
+      fp = open(path)
+      self.policies = json.load(fp)
 
   def get_repl_metaop_id(self, name, rem):
     '''
@@ -86,7 +97,8 @@ class Replication():
             if repl.reference_snapshot_handle:
               self.ref_snap_handle = repl.reference_snapshot_handle
             break
-  def get_slave_dump_path(self, comp, ip, add_ts=False):
+
+  def get_slave_dump_path(self, comp, ip, add_ts=True):
     fname = "%s_" % self.metaop_id + ip.replace('.', '_') + "_%s" % comp
     if add_ts:
       fname += time.strftime("_%Y%m%d_%H%M%S")
@@ -159,7 +171,7 @@ class Replication():
   def get_metaop_data(self):
     ip = get_cerebro_master()
     url="http://%s/?pd=%s&op=%d" % (ip,self.pd,self.metaop_id)
-    web = urllib.urlopen(url)
+    web = urllib2.urlopen(url)
     if web.getcode() != 200:
       print "ERROR: couldn't get the page"
       return None
@@ -191,9 +203,73 @@ class Replication():
     file_path = self.dump_dir + "replication_summary.txt"
     self.dump_to_file(file_path, summary, convert=False)
 
-  # stargate_slave_data = {"port": 2009, "c"="vdisk_controller", low=256, regex=["VDiskMicroReadExtentsOp", "VDiskMicroCerebroReplicateOp"]}
-  # stargate_replicate_latency {"url": "http:0:2009/latency/replicate_stats"}
-  # cerebro_slave_data = {"port": 2020, "c"="cerebro_slave", low=256}
+  def get_html_page_urls(self, ip, policy):
+  '''
+  Per policy, come up with unique url and name which when run will collect a file.
+
+  '''
+    urllist = {}
+    url = "http://%s:%s/" % (ip, policy['port'])
+    name + ip.replace("_", "-") + str(policy['port'])
+    for si in self.slave_info:
+      if si.get("slave IP") == ip:
+        my_si = si
+        if policy.has_key("url"):
+          urlpath = policy["url"]
+          work_id = si.get("work_id")
+          if "replicate_stats" in urlpath:
+            key="?id="
+          elif "replication_stats" in urlpath:
+            key="?work_id="
+          url += urlpath
+          if work_id:
+            url += key + str(work_id)
+        urls[name] = url
+    urlpath = policy.get("url", "h/traces?")
+    if policy.has_key('c'):
+      urlpath += "c=" + policy["c"] + "&"
+      name += "_" + policy["c"]
+    if policy.has_key('low'):
+      urlpath += "low=" + policy["low"] + "&"
+    if policy.has_key('metaopid'):
+      urlpath += "id=" + policy["metaopid"] + "&"
+      name += "_" + policy["metaopid"]
+    else:
+      urlpath += "id=" + self.meta_opid + "&"
+      name += "_" + self.meta_opid
+    if policy.has_key('work_id'):
+      urlpath += "work_id=" + policy["work_id"] + "&"
+      name += "_" + policy["work_id"]
+    else:
+      urlpath += "work_id=" + si.get("work_id", 0) + "&"
+      name += "_" + si.get("work_id", 0)
+    if policy.has_key('c') or policy.has_key('expand') or policy.has_key('low'):
+      urlpath += "expand=&"
+    if policy.has_key('a'):
+      urlpath += "a=" + policy["a"] + "&"
+    if policy.has_key('regex'):
+      for r in policy['regex']:
+        url += urlpath + "regex=" + policy['regex']
+        name += "_" + r
+        urls[name] = url
+    else:
+      urls[name] = url
+    '''
+    web = urllib2.urlopen(url)
+    if web.getcode() != 200:
+      print "ERROR: couldn't get the page" % name
+      continue
+    resp = request(url, params=params)
+    for name, url in urls:
+    path = self.get_slave_dump_path(name, ip)
+    data = web.read()
+    self.dump_to_file(path + '.html', data, convert=True)
+    '''
+
+  # stargate_slave_data = {"port": 2009, "c": "vdisk_controller", "low": 256, "regex": ["VDiskMicroReadExtentsOp", "VDiskMicroCerebroReplicateOp"]}
+  # stargate_replicate_latency {"port": 2009, "url": "latency/replicate_stats", id: 567028}
+  # stargate_replication_stats {"url": "http:0:2009/replication_stats", "work_id": 567028}
+  # cerebro_slave_data = {"port": 2020, "c": "cerebro_slave", low: 256}
 
   #   . http://0:2009/replication_stats?work_id=567028 with work_id
   #   . http://0:2009/latency/replicate_stats?id=567028
@@ -201,33 +277,40 @@ class Replication():
     if len(self.slave_info):
       ipl = list(set([si.get('slave IP', None) for si in self.slave_info]))
       for ip in ipl:
-        url="http://%s:2020/h/traces?c=cerebro_slave&expand=" % ip
-        web = urllib.urlopen(url)
-        if web.getcode() != 200:
-          print "ERROR: couldn't get the page"
-          continue
-        path = self.get_slave_dump_path("cerebro_slave", ip)
-        data = web.read()
-        self.replicate_file_op_page_txt_vec.append(data)
-        self.dump_to_file(path + '.html', data, convert=True)
+        for policy in self.policies:
+          get_html_page_urls(ip, policy)
 
-        # c=vdisk_controller&a=completed&regex=VDiskMicroCerebroReplicateOp
-        url='http://%s:2009/h/traces?c=vdisk_controller&' % ip
-        vdisk_ext_read_ext = "low=256&a=completed&regex=VDiskMicroReadExtentsOp&expand="
-        web = urllib.urlopen(url + vdisk_ext_read_ext)
-        if web.getcode() != 200:
-          print "ERROR: couldn't get the page"
-          continue
-        path = self.get_slave_dump_path("vdisk_read_extent", ip)
-        self.dump_to_file(path + '.html', data, convert=True)
+        if not self.policies:
+          url="http://%s:%s/h/traces?c=cerebro_slave&expand=" % (ip, "2020")
+          web = urllib2.urlopen(url)
+          if web.getcode() != 200:
+            print "ERROR: couldn't get the page"
+            continue
+          path = self.get_slave_dump_path("cerebro_slave", ip)
+          data = web.read()
+          self.replicate_file_op_page_txt_vec.append(data)
+          self.dump_to_file(path + '.html', data, convert=True)
 
-        vdisk_replicate_ext = "low=256&a=completed&regex=VDiskMicroCerebroReplicateOp"
-        web = urllib.urlopen(url + vdisk_replicate_ext)
-        if web.getcode() != 200:
-          print "ERROR: couldn't get the page"
-          continue
-        path = self.get_slave_dump_path("vdisk_replicate", ip)
-        self.dump_to_file(path + '.html', data, convert=True)
+          # c=vdisk_controller&a=completed&regex=VDiskMicroCerebroReplicateOp
+          url='http://%s:2009/h/traces?c=vdisk_controller&' % ip
+          vdisk_ext_read_ext = "low=256&a=completed&regex=VDiskMicroReadExtentsOp&expand="
+          web = urllib2.urlopen(url + vdisk_ext_read_ext)
+          if web.getcode() != 200:
+            print "ERROR: couldn't get the page"
+            continue
+          data = web.read()
+          path = self.get_slave_dump_path("vdisk_read_extent", ip)
+          self.dump_to_file(path + '.html', data, convert=True)
+
+          vdisk_replicate_ext = "low=256&a=completed&regex=VDiskMicroCerebroReplicateOp"
+          web = urllib2.urlopen(url + vdisk_replicate_ext)
+          if web.getcode() != 200:
+            print "ERROR: couldn't get the page"
+            continue
+          data = web.read()
+          path = self.get_slave_dump_path("vdisk_replicate", ip)
+          self.dump_to_file(path + '.html', data, convert=True)
+
 
 if __name__ == "__main__":
   argv = FLAGS(sys.argv)
