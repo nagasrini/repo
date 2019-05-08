@@ -1,25 +1,49 @@
 # A list of dictionaries defining parameters for pages. Can had list of regexes.
 [
 {
-  port: 2009,
-  c: vdisk_controller,
-  low: 256,
-  regex: [
-    "VDiskMicroReadExtentsOp",
-    "VDiskMicroCerebroReplicateOp"
+  "port": 2009,
+  "urlpath": "/h/traces",
+  "param": [
+    {
+      "c": "vdisk_controller",
+      "low": 256,
+      "regex":
+        "VDiskMicroReadExtentsOp"
+    },
+    {
+      "c": "vdisk_controller",
+      "low": 256,
+      "regex":
+        "VDiskMicroCerebroReplicateOp"
+    }
   ]
 },
 {
-  port: 2009,
-  url: "latency/replicate_stats"
+  "port": 2009,
+  "urlpath": "/latency/replicate_stats",
+  "params": {
+    "id": 0
+  }
 },
 {
-  port: 2009,
-  url: "replication_stats"
-}
+  "port": 2009,
+  "urlpath": "/replication_stats"
+},
 {
-  port: 2020,
-  c: "cerebro_slave",
-  low: 256
+  "port": 2009,
+  "urlpath": "/replication_stats",
+  "params": {
+    "work_id": 0
+  }
+},
+{
+  "port": 2020,
+  "urlpath": "/h/traces",
+  "params": [
+    {
+      "low": 256,
+      "c": "cerebro_slave"
+    }
+  ]
 }
 ]

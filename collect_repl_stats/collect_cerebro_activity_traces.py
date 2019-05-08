@@ -12,6 +12,7 @@ import time
 import requests
 import urllib2
 import re
+import json
 from lxml import etree
 for path in os.listdir("/usr/local/nutanix/lib/py"):
         sys.path.insert(0, os.path.join("/usr/local/nutanix/lib/py", path))
@@ -73,6 +74,7 @@ class Replication():
     if os.path.isfile(path):
       fp = open(path)
       self.policies = json.load(fp)
+      #print self.policies
 
   def get_repl_metaop_id(self, name, rem):
     '''
@@ -98,12 +100,11 @@ class Replication():
               self.ref_snap_handle = repl.reference_snapshot_handle
             break
 
-  def get_slave_dump_path(self, comp, ip, add_ts=True):
-    fname = "%s_" % self.metaop_id + ip.replace('.', '_') + "_%s" % comp
+  def get_slave_dump_path(self, name, add_ts=True):
+    fname = "%s-" % self.metaop_id + "%s" % name
     if add_ts:
-      fname += time.strftime("_%Y%m%d_%H%M%S")
-    return self.dump_dir + fname
-
+      fname += time.strftime("-%Y%m%d_%H%M%S")
+    return os.path.join(self.dump_dir, fname)
 
   def dump_to_file(self, path, data_bytes, convert=True):
     '''
@@ -170,17 +171,17 @@ class Replication():
 
   def get_metaop_data(self):
     ip = get_cerebro_master()
-    url="http://%s/?pd=%s&op=%d" % (ip,self.pd,self.metaop_id)
-    web = urllib2.urlopen(url)
-    if web.getcode() != 200:
-      print "ERROR: couldn't get the page"
+    params = {"pd": self.pd, "op": self.metaop_id}
+    url="http://%s" % ip #includes port
+    resp = requests.get(url, params=params)
+    if not resp.ok:
+      log.ERROR("Couldn't get metaop info for %s" % self.metaop_id)
       return None
-    self.metaop_page_txt = web.read()
+    self.metaop_page_txt = resp.text
     self.metaop_page = self.dump_dir + "/%d_replicate_metaop" % self.metaop_id
     file_path = self.metaop_page + ".html"
     self.dump_to_file(file_path, self.metaop_page_txt, convert=True)
     self.parse_replicate_metaop()
-
 
   def get_replication_summary(self):
     summary = "Summary of replication of PD %s to Remote Site %s\n" % \
@@ -200,71 +201,81 @@ class Replication():
       summary += "\nNo Slaves Found"
 
     self.summary = summary
-    file_path = self.dump_dir + "replication_summary.txt"
+    file_path = os.path.join(self.dump_dir, "replication_summary.txt")
     self.dump_to_file(file_path, summary, convert=False)
 
   def get_html_page_urls(self, ip, policy):
-  '''
-  Per policy, come up with unique url and name which when run will collect a file.
-
-  '''
-    urllist = {}
-    url = "http://%s:%s/" % (ip, policy['port'])
-    name + ip.replace("_", "-") + str(policy['port'])
+    '''
+    Per policy, come up with unique url and name which when run will collect a file.
+    '''
+    done = False
+    urldlist = []
+    base_name = ip.replace(".", "_") + "-" + str(policy['port'])
     for si in self.slave_info:
+      name = base_name
+      urldic = {}
+      urldic["url"] = "http://%s:%s" % (ip, policy['port'])
       if si.get("slave IP") == ip:
         my_si = si
-        if policy.has_key("url"):
-          urlpath = policy["url"]
-          work_id = si.get("work_id")
+        if policy.has_key("urlpath"):
+          urlpath = policy["urlpath"]
+          work_id = si.get("work_id", 0)
+          paramsl = policy.get("params", [{}])
+          params = paramsl[0]
           if "replicate_stats" in urlpath:
-            key="?id="
+            if params and work_id:
+              params["id"] = work_id
+              name += "-" + str(work_id)
+            name += "-" + "replicate_stats"
           elif "replication_stats" in urlpath:
-            key="?work_id="
-          url += urlpath
-          if work_id:
-            url += key + str(work_id)
-        urls[name] = url
-    urlpath = policy.get("url", "h/traces?")
-    if policy.has_key('c'):
-      urlpath += "c=" + policy["c"] + "&"
-      name += "_" + policy["c"]
-    if policy.has_key('low'):
-      urlpath += "low=" + policy["low"] + "&"
-    if policy.has_key('metaopid'):
-      urlpath += "id=" + policy["metaopid"] + "&"
-      name += "_" + policy["metaopid"]
-    else:
-      urlpath += "id=" + self.meta_opid + "&"
-      name += "_" + self.meta_opid
-    if policy.has_key('work_id'):
-      urlpath += "work_id=" + policy["work_id"] + "&"
-      name += "_" + policy["work_id"]
-    else:
-      urlpath += "work_id=" + si.get("work_id", 0) + "&"
-      name += "_" + si.get("work_id", 0)
-    if policy.has_key('c') or policy.has_key('expand') or policy.has_key('low'):
-      urlpath += "expand=&"
-    if policy.has_key('a'):
-      urlpath += "a=" + policy["a"] + "&"
-    if policy.has_key('regex'):
-      for r in policy['regex']:
-        url += urlpath + "regex=" + policy['regex']
-        name += "_" + r
-        urls[name] = url
-    else:
-      urls[name] = url
+            if params and work_id:
+              params["work_id"] = work_id
+              name += "-" + str(work_id)
+            name += "-" + "replication_stats"
+          else:
+            continue
+        urldic["urlpath"] = urlpath
+        urldic["params"] = params
+        urldic["name"] = name
+        urldlist.append(urldic)
+        done = True
+
+    if done:
+      return urldlist
+
+    urlpath = policy.get("urlpath", "/")
+    paremsl = policy.get("params", [{}])
+    for params in paramsl:
+      urldic = {}
+      urldic["url"] = "http://%s:%s" % (ip, policy['port'])
+      if "h/traces" in params.get("urlpath", ""):
+        params["expand"] = ""
+      urldic["urlpath"] = urlpath
+      urldic["params"] = params
+      comp = params.get("regex", params.get("c", "h-traces"))
+      urldic["name"] = base_name + "-%s" % comp
+      urldlist.append(urldic)
+    return urldlist
+
+  def get_html_page_dump(self, ip, urldlist):
     '''
     web = urllib2.urlopen(url)
     if web.getcode() != 200:
       print "ERROR: couldn't get the page" % name
       continue
     resp = request(url, params=params)
-    for name, url in urls:
-    path = self.get_slave_dump_path(name, ip)
-    data = web.read()
-    self.dump_to_file(path + '.html', data, convert=True)
     '''
+    for urldic in urldlist:
+      log.INFO(urldic)
+      name = urldic["name"]
+      url = urldic["url"] + urldic["urlpath"]
+      params = urldic["params"]
+      path = self.get_slave_dump_path(name, ip)
+      resp = requests.get(url, params=params)
+      log.INFO("url: %s" % resp.url)
+      if not resp.ok:
+        log.ERROR("Couldn't get slave page dumped")
+      self.dump_to_file(path + '.html', resp.text, convert=True)
 
   # stargate_slave_data = {"port": 2009, "c": "vdisk_controller", "low": 256, "regex": ["VDiskMicroReadExtentsOp", "VDiskMicroCerebroReplicateOp"]}
   # stargate_replicate_latency {"port": 2009, "url": "latency/replicate_stats", id: 567028}
@@ -278,15 +289,16 @@ class Replication():
       ipl = list(set([si.get('slave IP', None) for si in self.slave_info]))
       for ip in ipl:
         for policy in self.policies:
-          get_html_page_urls(ip, policy)
-
+          urldlist = self.get_html_page_urls(ip, policy)
+          self.get_html_page_dump(ip, urldlist)
+        '''
         if not self.policies:
           url="http://%s:%s/h/traces?c=cerebro_slave&expand=" % (ip, "2020")
           web = urllib2.urlopen(url)
           if web.getcode() != 200:
             print "ERROR: couldn't get the page"
             continue
-          path = self.get_slave_dump_path("cerebro_slave", ip)
+          path = self.get_slave_dump_path("%s_cerebro_slave" % ipreplace(".", "_"))
           data = web.read()
           self.replicate_file_op_page_txt_vec.append(data)
           self.dump_to_file(path + '.html', data, convert=True)
@@ -299,7 +311,7 @@ class Replication():
             print "ERROR: couldn't get the page"
             continue
           data = web.read()
-          path = self.get_slave_dump_path("vdisk_read_extent", ip)
+          path = self.get_slave_dump_path("%s_vdisk_read_extent" % ipreplace(".", "_"))
           self.dump_to_file(path + '.html', data, convert=True)
 
           vdisk_replicate_ext = "low=256&a=completed&regex=VDiskMicroCerebroReplicateOp"
@@ -308,9 +320,9 @@ class Replication():
             print "ERROR: couldn't get the page"
             continue
           data = web.read()
-          path = self.get_slave_dump_path("vdisk_replicate", ip)
+          path = self.get_slave_dump_path("%s_vdisk_replicate" % ip.replace(".", "_"))
           self.dump_to_file(path + '.html', data, convert=True)
-
+          '''
 
 if __name__ == "__main__":
   argv = FLAGS(sys.argv)
