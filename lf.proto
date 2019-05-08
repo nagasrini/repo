@@ -1,0 +1,20 @@
+syntax = "proto2";
+
+package log_filter;
+
+message LogEntry {
+  optional string ip = 1;
+  required string service = 2;
+  enum Type {
+    INFO = 0;
+    WARNING = 1;
+    ERROR = 2;
+    FATAL = 3;
+  }
+  optional Type type = 3 [ default = INFO ];
+  required float timestamp = 4;
+  optional int32 thread_id = 5;
+  required string source_file = 6;
+  required int32 line_no = 7;
+  required string msg = 8;
+}
