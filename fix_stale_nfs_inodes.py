@@ -293,7 +293,7 @@ def modify_proto(medusa_proto, inputfile, zk_dict):
     print "Nothing to do: inode's epoch is not older than that of container"
     return False
 
-  if len(entry.nfs_attr.locs) == 1:
+  if len(entry.nfs_attr.locs) == 1 and not FLAGS.fix_single_loc:
     print "Has one loc, needs a manual review"
     return False
 
@@ -327,10 +327,10 @@ def modify_proto(medusa_proto, inputfile, zk_dict):
 
   print "removing or fixing %d locs" % len(rm_loc_list)
   for idx in rm_loc_list.__reversed__():
-    loc = entry_nfs_attr.locs[i]
+    loc = entry.nfs_attr.locs[i]
     if inc_id < loc.incarnation_id:
       # fix loc
-      loc.inc_id = inc_id - 1
+      loc.incarnation_id = inc_id - 1
     else:
       # remove loc
       entry.nfs_attr.locs.remove(loc)
@@ -385,6 +385,7 @@ if __name__ == "__main__":
   inode_list = []
   total_viewed = 0
   total_skipped = 0
+  total_old_epoch = 0
   total_invalid = 0
   total_walid = 0
   total_snaps = 0
@@ -403,14 +404,13 @@ if __name__ == "__main__":
       continue
 
     component_dict = zk_dict["component_dict"]
-    total_skipped += 1
     if curr_epoch > inode_id.epoch:
       reason = ""
       # we don't validate snapshots
       if inode_id.fsid == 0:
         total_snaps += 1
         continue
-      total_skipped -= 1
+      total_old_epoch += 1
       last_flushed = zk_dict["last_flushed"]
       prev_wal_id = nfsmap.nfs_attr.prev_wal_id
       wal_id = nfsmap.nfs_attr.wal_id
@@ -463,10 +463,11 @@ if __name__ == "__main__":
 
   print "total_viewed: %d" % total_viewed
   print "total_skipped: %d" % total_skipped
+  print "total_old_epoch: %d" % total_old_epoch
   print "total_invalid: %d -- total_invalid_comp: %d; total_invalid_operation: %d;" \
     " total_invalid_incarnation: %d" % (total_invalid, total_invalid_comp, \
     total_invalid_operation, total_invalid_incarnation)
-  print "total_walid: %d" % total_viewed
+  print "total_walid: %d" % total_walid
   print "total_invalid_single_loc: %d" % total_invalid_single_loc
   print "total_snaps: %d" % total_snaps
   if not FLAGS.fix:
