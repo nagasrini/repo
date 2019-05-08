@@ -81,37 +81,37 @@ class MedusaHelper(object):
       MedusaErrorStatus.kBackendUnavailable,
     cassandra_pb2.CassandraError.kRetry :
       MedusaErrorStatus.kRetry }
-  
+
   # Medusa Cassandra constants.
   #TODO: Move these as class variables
   # nfsmap
   kNFSMap = "medusa_nfsmap"
   kNFSMapCF = "nfsmap"
   kNFSMapColumn = "0"
-  
+
   #vdiskblock map
   kVDiskBlockMap = "medusa_vdiskblockmap"
   kVDiskBlockMapCF = "vdiskblockmap"
   ## The column is based on vblock_num
   #kVDiskBlockMapColumn = "1"
   kVDiskColumnNameWidth = 16
-  
+
   # egidmap
   kEGIDMap = "medusa_extentgroupidmap"
   kEGIDMapCF = "extentgroupidmap"
   kEGIDMapColumn = "1"
-  
+
   # alerts
   kAlertsMap = "alerts_keyspace"
   kAlertsCF = "alerts_cf"
-  
+
   keyspace_to_proto_map = {
                         kNFSMap:medusa_pb2.MedusaNFSMapEntryProto,
                         kVDiskBlockMap:medusa_pb2.MedusaVDiskBlockMapEntryProto,
                         kEGIDMap:medusa_pb2.MedusaExtentGroupIdMapEntryProto,
                         kAlertsMap:alert_pb2.AlertProto}
-    
-  
+
+
   # Cassandra token hash constants.
   kNumHashChars = 62
   kHashChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -146,7 +146,7 @@ class MedusaHelper(object):
     arg.keyspace = keyspace
     arg.column_parent.column_family = cf
     arg.predicate.slice_range.count = 10 # medusa_printer sets this to kint32max, 2^32?
-    arg.predicate.slice_range.start = "" 
+    arg.predicate.slice_range.start = ""
     arg.predicate.slice_range.finish = ""
     arg.consistency_level = cassandra_pb2.CassandraConsistencyLevel.kQuorum
     arg.range.end_token = end_token
@@ -168,7 +168,7 @@ class MedusaHelper(object):
       except (RpcClientTransportError, CassandraClientError) as exc:
         print("Cassandra rpc failed with: %s", exc)
         return None
-  
+
       if not getrange_slices_ret or len(getrange_slices_ret.range_slices) == 0:
         break
 
@@ -216,7 +216,7 @@ if __name__ == "__main__":
   ctr_dict={}
   for ctr in zcp.container_list:
     ctr_dict[str(ctr.container_id)] = ctr
-  
+
   nfsmaps = mh.scan(mh.kNFSMap, mh.kNFSMapCF)
   # Add the check here.
   for key, nfsmap in nfsmaps.iteritems():
@@ -240,7 +240,7 @@ if __name__ == "__main__":
           break
         s = zks.get('/appliance/logical/clock/' + str(loc.component_id))
         d = re.compile(r"incarnation_id: (?P<inc_id>\d+)operation_id: (?P<op_id>\d+)").match(s).groupdict()
-        
+
         if int(d["inc_id"]) < loc.incarnation_id :
           invalid = True
           reason = "The loc's incarnation_id is greater: loc: %d vs. %s" % (loc.incarnation_id, d["inc_id"])
