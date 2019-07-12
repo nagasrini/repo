@@ -26,7 +26,7 @@ def cerebro_rpc_obj(rpc_name, typ):
   obj_name = rpc_name + suffix
   return cerebro.interface.cerebro_interface_pb2.__dict__.get(obj_name)
 
-filter_ip = "10.48.64.200"
+filter_ip = "10.48.64.202"
 filter_port = 2020
 filter_rpc = "QueryRemoteClusterStatus"
 
@@ -35,13 +35,59 @@ class type():
     RES = 2
 
 class Mypcap():
-  def __init__(self):
-    self.socket = socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x3))
-    self.socket.bind(('eth0',0))
+  def __init__(self, file=None):
+    self.fh = None
+    if not file:
+      self.socket = socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x3))
+      self.socket.bind(('eth0',0))
+    else:
+      try:
+        self.fh = open(file, 'r')
+      except Exception as e:
+        print "ERROR: Opening file %s failed: %s" % (file, e)
+        return
+      self.pcap_gh = {}
+      self.read_header()
+      if self.pcap_gh['magicnum'] != 0xd4c3b2a1:
+        print "ERROR: The pcap file %s is corrupt" % file
+        return
+      self.offset = 24
     self.rpc_id_map = {}
     self.iph = {}
     self.tcph = {}
     self.ethf = {}
+    self.pkt_read = 0 # packets read successfully
+    self.pkt_filtered = 0 # packets filtered out
+
+  def read_header(self):
+    self.fh.seek(0)
+    hbuf = self.fh.read(24)
+    gh = struct.unpack("!IHHiIII", hbuf)
+    self.pcap_gh['magicnum'] = gh[0]
+    self.pcap_gh['majorver'] = gh[1]
+    self.pcap_gh['minorver'] = gh[2]
+    self.pcap_gh['thiszone'] = gh[3]
+    self.pcap_gh['sigfigs'] = gh[4]
+    self.pcap_gh['snaplen'] = gh[5]
+    self.pcap_gh['network'] = gh[5]
+
+  def read_one_record(self):
+    try:
+      phbuf = self.fh.read(16)
+    except Exception as e:
+      print "ERROR: reading buf"
+    if not len(phbuf):
+      print "INFO: End of file"
+      return False
+    ph = struct.unpack("IIII", phbuf)
+    self.cur_record = {}
+    self.cur_record['tssec'] = ph[0]
+    self.cur_record['tsusec'] = ph[1]
+    self.cur_record['incllen'] = ph[2]
+    self.cur_record['origlen'] = ph[3]
+    self.pbuf = self.fh.read(self.cur_record['incllen'])
+    #print "cur record len %d" % self.cur_record['incllen']
+    return True
 
   def get_ip_header(self):
     iph = struct.unpack("!BBHHHBBH4s4s", self.buf[0:20])
@@ -68,16 +114,24 @@ class Mypcap():
     self.tcph['hcksum'] = tcph[7]
 
   def get_ether_frame(self):
-    ethf = struct.unpack("!6s6sH", self.pbuf[0][:14])
+    ethf = struct.unpack("!6s6sH", self.ebuf)
     self.ethf['dmac'] = ethf[0]
     self.ethf['smac'] = ethf[1]
     self.ethf['etyp'] = ethf[2]
 
   def read_one(self, ip=None, port=None):
     while True:
-      self.pbuf = self.socket.recvfrom(65536)
-      self.ebuf = self.pbuf[0][:14]
-      self.buf = self.pbuf[0][14:]
+      self.pkt_filtered += 1 # assume as filtered; reset if not
+      if not self.fh:
+        self.sockbuf = self.socket.recvfrom(65536)
+        self.pbuf = self.sockbuf[0]
+      else:
+        if not self.read_one_record():
+          self.pkt_filtered -= 1
+          return False
+      self.pkt_read += 1 # got one packet
+      self.ebuf = self.pbuf[:14]
+      self.buf = self.pbuf[14:]
       self.get_ether_frame()
       # skip non-tcpip
       if self.ethf['etyp'] != 0x800:
@@ -97,7 +151,8 @@ class Mypcap():
         print "-> %s:%s %s:%s" % (self.iph['sip'], self.tcph['sport'], self.iph['dip'], self.tcph['dport'])
         if not ip or self.iph['sip'] == ip or self.iph['dip'] == ip:
           break
-      #print "DEBUG: Skip: filtered"
+    self.pkt_filtered -= 1
+    return True
 
   def parse_http(self):
     # HTTP
@@ -158,13 +213,11 @@ def scan():
   pcap = Mypcap()
   while True:
     print "####"
-    pcap.read_one(ip=filter_ip, port=filter_port)
-    print "#####INFO: source: %s:%s, dest: %s:%s" % (pcap.iph['sip'],
-      pcap.tcph['sport'], pcap.iph['dip'], pcap.tcph['dport'])
-    if pcap.type == type.REQ:
-      print "###########INFO Request"
-    else:
-      print "###########INFO Response"
+    if not pcap.read_one(ip=filter_ip, port=filter_port):
+      return
+    print "#####INFO: %s:%s --> %s:%s ## %s" % (pcap.iph['sip'],
+      pcap.tcph['sport'], pcap.iph['dip'], pcap.tcph['dport'],
+      "REQUEST" if pcap.type == type.REQ else "Response")
     http_payload = pcap.parse_http()
     if not http_payload:
       continue
@@ -173,8 +226,29 @@ def scan():
       #print "##########INFO rpc id : %d" % pcap.rpc_header.rpc_id
       print "##########INFO rpc header:\n%s" % (pcap.rpc_header)
       print "##########INFO rpc Method: %s" % (pcap.rpc_method_name)
-      print "##########INFO rpc payload:\n%s\n%s" % (pcap.arg_proto.__class__.__name__, pcap.arg_proto
-    # TODO: Handle cleaning up rpc_id_map entry for finished RPC
+      print "##########INFO rpc payload:\n%s\n%s" % (pcap.arg_proto.__class__.__name__, pcap.arg_proto)
+
+def read_pcap(f):
+  pcap = Mypcap(f)
+  while True:
+    print "\n####"
+    if not pcap.read_one(ip=filter_ip, port=filter_port):
+      break
+    print "#####INFO: %s:%s --> %s:%s ## %s" % (pcap.iph['sip'],
+      pcap.tcph['sport'], pcap.iph['dip'], pcap.tcph['dport'],
+      "REQUEST" if pcap.type == type.REQ else "Response")
+    http_payload = pcap.parse_http()
+    if not http_payload:
+      continue
+    pcap.parse_rpc(http_payload)
+    if pcap.rpc_header:
+      #print "##########INFO rpc id : %d" % pcap.rpc_header.rpc_id
+      print "##########INFO rpc header:\n%s" % (pcap.rpc_header)
+      print "##########INFO rpc Method: %s" % (pcap.rpc_method_name)
+      print "##########INFO rpc payload:\n%s\n%s" % (pcap.arg_proto.__class__.__name__, pcap.arg_proto)
+  print "Total packets %d" % pcap.pkt_read
+  print "Packets filtered out %d" % pcap.pkt_filtered
 
 if __name__ == "__main__":
-  scan()
+  #scan()
+  read_pcap("/tmp/2020.pcap")
