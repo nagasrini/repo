@@ -26,13 +26,14 @@ def cerebro_rpc_obj(rpc_name, typ):
   obj_name = rpc_name + suffix
   return cerebro.interface.cerebro_interface_pb2.__dict__.get(obj_name)
 
-filter_ip = "10.48.64.202"
-filter_port = 2020
+filter_ips = ["10.48.64.202"]
+filter_ports = [2020]
 filter_rpc = "QueryRemoteClusterStatus"
 
 class type():
     REQ = 1
     RES = 2
+
 
 class Mypcap():
   def __init__(self, file=None):
@@ -45,12 +46,12 @@ class Mypcap():
         self.fh = open(file, 'r')
       except Exception as e:
         print "ERROR: Opening file %s failed: %s" % (file, e)
-        return
+        raise Exception("ERROR: Opening file %s failed: %s" % (file, e))
       self.pcap_gh = {}
       self.read_header()
       if self.pcap_gh['magicnum'] != 0xd4c3b2a1:
         print "ERROR: The pcap file %s is corrupt" % file
-        return
+        raise Exception("ERROR: The pcap file %s is corrupt" % file)
       self.offset = 24
     self.rpc_id_map = {}
     self.iph = {}
@@ -92,7 +93,7 @@ class Mypcap():
   def get_ip_header(self):
     iph = struct.unpack("!BBHHHBBH4s4s", self.buf[0:20])
     self.iph['version'] = iph[0] >> 4
-    self.iph['hlen'] = iph[0] & 0xf
+    self.iph['hlen'] = (iph[0] & 0xf) * 4 # last 4bits - no of 32 bit words
     self.iph['tos'] = iph[1]
     self.iph['total_len'] = iph[2]
     self.iph['id'] = iph[3]
@@ -100,8 +101,8 @@ class Mypcap():
     self.iph['ttl'] = iph[5]
     self.iph['proto'] = iph[6]
     self.iph['hcksum'] = iph[7]
-    self.iph['dip'] = socket.inet_ntoa(iph[8])
-    self.iph['sip'] = socket.inet_ntoa(iph[9])
+    self.iph['sip'] = socket.inet_ntoa(iph[8])
+    self.iph['dip'] = socket.inet_ntoa(iph[9])
 
   def get_tcp_header(self):
     tcph = struct.unpack("!HHLLBBHHH", self.buf[20:40])
@@ -109,9 +110,9 @@ class Mypcap():
     self.tcph['dport'] = tcph[1]
     self.tcph['seqno'] = tcph[2]
     self.tcph['ackno'] = tcph[3]
-    self.tcph['hlen'] = tcph[4] >> 2 #6bits of 8bits
+    self.tcph['hlen'] = (tcph[4] >> 4)*4  #4bits of 8bits - no of 32bit words
     self.tcph['wsize'] = tcph[7]
-    self.tcph['hcksum'] = tcph[7]
+    self.tcph['hcksum'] = tcph[8]
 
   def get_ether_frame(self):
     ethf = struct.unpack("!6s6sH", self.ebuf)
@@ -119,7 +120,7 @@ class Mypcap():
     self.ethf['smac'] = ethf[1]
     self.ethf['etyp'] = ethf[2]
 
-  def read_one(self, ip=None, port=None):
+  def read_one(self, ips=None, ports=None):
     while True:
       self.pkt_filtered += 1 # assume as filtered; reset if not
       if not self.fh:
@@ -139,17 +140,17 @@ class Mypcap():
       if len(self.buf) < 40:
         print "WARN: shorter packet (len=%s)" % (len(self.buf))
       self.get_ip_header()
-      #print ip_header
+      #print self.iph
       self.get_tcp_header()
-      #print tcp_header
-      self.poffset = (self.iph['hlen'] * 4) + self.tcph['hlen']
+      #print self.tcph
+      self.poffset = self.iph['hlen'] + self.tcph['hlen']
       if self.poffset >= self.iph['total_len']:
         #print "DEBUG: Skip: no tcp payload %d" % len(self.buf)
         continue
-      self.type = type.REQ if self.tcph['dport'] == filter_port else type.RES
-      if not port or self.tcph['sport'] == port or self.tcph['dport'] == port:
-        print "-> %s:%s %s:%s" % (self.iph['sip'], self.tcph['sport'], self.iph['dip'], self.tcph['dport'])
-        if not ip or self.iph['sip'] == ip or self.iph['dip'] == ip:
+      self.type = type.REQ if self.tcph['dport'] <= 49151 else type.RES
+      if not ports or len(ports) or self.tcph['sport'] in ports or self.tcph['dport'] in ports:
+        #print "-> %s:%s %s:%s" % (self.iph['sip'], self.tcph['sport'], self.iph['dip'], self.tcph['dport'])
+        if not ips or not len(ips) or self.iph['sip'] in ips or self.iph['dip'] in ips:
           break
     self.pkt_filtered -= 1
     return True
@@ -213,7 +214,7 @@ def scan():
   pcap = Mypcap()
   while True:
     print "####"
-    if not pcap.read_one(ip=filter_ip, port=filter_port):
+    if not pcap.read_one(ips=filter_ips, ports=filter_ports):
       return
     print "#####INFO: %s:%s --> %s:%s ## %s" % (pcap.iph['sip'],
       pcap.tcph['sport'], pcap.iph['dip'], pcap.tcph['dport'],
@@ -232,7 +233,7 @@ def read_pcap(f):
   pcap = Mypcap(f)
   while True:
     print "\n####"
-    if not pcap.read_one(ip=filter_ip, port=filter_port):
+    if not pcap.read_one(ips=filter_ips, ports=filter_ports):
       break
     print "#####INFO: %s:%s --> %s:%s ## %s" % (pcap.iph['sip'],
       pcap.tcph['sport'], pcap.iph['dip'], pcap.tcph['dport'],
@@ -251,4 +252,4 @@ def read_pcap(f):
 
 if __name__ == "__main__":
   #scan()
-  read_pcap("/tmp/2020.pcap")
+  read_pcap("/tmp/repl2020.pcap")
