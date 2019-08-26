@@ -68,10 +68,11 @@ class UserRecord():
         debug_print("### ERROR: reading proto %s" % proto_name)
         continue
       self.pobjs[proto_name] = proto_obj
-      if proto_name in ["RpcRequestHeader", "RpcResponseHeader"]:
-        self.out["rpc"] = handle_rpc_header(proto_obj)
-      elif proto_name in "RpcBinaryLogRecordMetadata":
-        self.out["rpc_binary"] = handle_rpc_binary_record(proto_obj)
+      pn = proto_name.split('.')[-1]
+      if pn in ["RpcRequestHeader", "RpcResponseHeader"]:
+        self.out["rpc"] = self.handle_rpc_header(proto_obj)
+      elif "RpcBinaryLogRecordMetadata" in proto_name:
+        self.out["rpc_binary"] = self.handle_rpc_binary_record(proto_obj)
       else:
         self.out["proto"] = self.handle_other_proto(proto_name, proto_obj)
 
@@ -79,16 +80,19 @@ class UserRecord():
     self.req_ur = None
     self.rpc_header = proto_obj
     #pending response
-    self.is_pending = "Request" in rpc_header.__class__.__name__
+    self.is_pending = "Request" in self.rpc_header.__class__.__name__
     debug_print("<=========\nself.rpc_header\n=========>")
+    rh_out = "%s" % self.rpc_header
     if not self.is_pending:
-      self.req_urec = pc_id_map.get(self.rpc_header.rpc_id, None)
+      self.req_urec = rpc_id_map.get(self.rpc_header.rpc_id, None)
       if not self.req_urec: # request for this response not found
         self.is_pending = True
-      self.elapsed_time = self.ts - req_urec.time_usecs
-      req_proto_name = req_rpc_header.method_name
-      rh_out += " " + " %s { %s } ->" % (req_proto_name, req_proto_obj)
-    rh_out += "%s" % req_rpc_header
+      else:
+        self.elapsed_time = self.ts - self.req_urec.ts
+        req_proto_name = self.req_urec.rpc_header.method_name
+        req_proto_obj = self.req_urec.pobjs.get(req_proto_name, None)
+        rh_out += " " + " %s { %s } ->" % (req_proto_name, req_proto_obj)
+        rh_out += "%s" % self.req_urec.rpc_header
     return rh_out.replace("\n", " ")
 
   def handle_other_proto(self, pname, pobj):
@@ -103,7 +107,7 @@ class UserRecord():
   def myprint(self):
     ts = "%s" % dateobj(self.ts).strftime("%m%d%Y %H:%M:%S.%f")
     et = " + %d" % self.elapsed_time if self.elapsed_time else ""
-    print "%s%s %s " % (ts, self.elapsed_time, self.out)
+    print "%s%s %s " % (ts, et, self.out)
 
 proto_map = {}
 def read_one_record(f):
