@@ -1,4 +1,4 @@
-# v.0.2
+# v.0.3
 # Use arithmos where possible
 # Use curator when exclusive usage is available
 # find usage on active side as well.
@@ -26,6 +26,13 @@ FLAGS = gflags.FLAGS
 
 CerebroRpcClient = CerebroInterfaceTool()
 ArithmosRpcClient = ArithmosInterface()
+gml_arg = GetMasterLocationArg()
+try:
+  error,_,ret = ArithmosRpcClient.get_master_location(gml_arg)
+except Exception as e:
+  log.ERROR("Arithmos get master location %s, %s" % (error, e))
+if ret:
+  ArithmosRpcClient = ArithmosInterface(ret.master_handle.split(":")[0])
 
 remote_site_map = {}
 
@@ -50,10 +57,23 @@ output_file = "/tmp/vup.proto"
 remote_pclient = {} # remote pithos client
 local_pithos_cache ={}
 
-import curator.client.curator_interface_client as curator_client
-from curator.client.interface.curator_client_interface_pb2 import *
+try:
+  import curator.client.curator_interface_client as curator_client
+  from curator.client.interface.curator_client_interface_pb2 import *
+except:
+  import cdp.client.curator.client.curator_interface_client as curator_client
+  from cdp.client.curator.client.interface.curator_client_interface_pb2 import *
 
 CuratorRpcClient = curator_client.CuratorInterfaceClient()
+
+try:
+  get_master_location_arg = curator_client.GetMasterLocationArg()
+  get_master_location_ret = CuratorRpcClient.GetMasterLocation(get_master_location_arg)
+  (curator_ip, curator_port) = str(get_master_location_ret.master_handle).split(":")
+except curator_client.CuratorInterfaceError as error:
+  log.ERROR("RPC failed. Couldn't acquire the curator master information. Error: %s" % error)
+
+CuratorRpcClient = curator_client.CuratorInterfaceClient(curator_ip, curator_port)
 
 def get_vdisk_config(pithos_client, vdisk_id):
   '''
@@ -88,8 +108,9 @@ def get_local_only_vdisks(vdisk_list):
   if not FLAGS.remote_check:
     return vdisk_list
 
+  remote_pclient = {}
+
   for vdisk_id in vdisk_list:
-    remote_pclient = None
     r_pclient = None
     vdisk_config = get_vdisk_config(local_pithos_client, vdisk_id)
     if not vdisk_config:
@@ -100,7 +121,7 @@ def get_local_only_vdisks(vdisk_list):
       for remote_ip in remote_ip_list:
         r_pclient = remote_pclient.get(vdisk_config.originating_cluster_id)
         if not r_pclient:
-          r_pclient = pclient(vdisk_config.originating_cluster_id)
+          r_pclient = pclient(remote_ip)
           remote_pclient[remote_ip] = r_pclient
           if r_pclient:
             break
@@ -119,11 +140,12 @@ def get_local_only_vdisks(vdisk_list):
   return filtered_vdisk_list
 
 class Vdisk(object):
-  def __init__(self, name, id):
+  def __init__(self, name, id, excl_bytes=-1):
     self.name = name
     self.id = id
     self.vdisk_size = 0
-    self.vdisk_exclusive_bytes = None # unless curator calculates excl. size
+    self.vdisk_exclusive_bytes = excl_bytes # unless curator calculates excl. size
+    '''
     qvu_arg = curator_client.QueryVDiskUsageArg()
     qvu_arg.vdisk_id_list.append(id)
     qvu_ret = CuratorRpcClient.QueryVDiskUsage(qvu_arg)
@@ -135,7 +157,6 @@ class Vdisk(object):
       return
     self.vdisk_exclusive_bytes = qvu_ret.exclusive_usage_bytes[0]
 
-    '''
     The arithmos stat for vdisk is only for leaf vdisks.
     # get vdisk stats from Arithmos
     if not ArithmosRpcClient:
@@ -157,6 +178,7 @@ class Snapshot(object):
     self.scb = scb
     self.usage = 0
     self.exclusive_usage = 0
+    log.INFO("Processing snapshot %s" % self.handle)
 
     if not ArithmosRpcClient:
       ArithmosRpcClient = ArithmosInterface()
@@ -167,6 +189,7 @@ class Snapshot(object):
     query_request.entity_id = self.handle.replace(":", "-")
     err,_,ret = self.arithmos.master_get_stats(query_proto)
     if not ret:
+      log.ERROR("Arithmos error for snapshot %s" % self.handle)
       return
     response = ret.response_list[0]
     if response and not response.error:
@@ -181,12 +204,28 @@ class Snapshot(object):
 
     self.local_only_vdisk_list = get_local_only_vdisks(scb.entity_vdisk_id_vec)
 
-    for vdisk_id in list(scb.entity_vdisk_id_vec):
+    if not len(self.local_only_vdisk_list):
+      return
+
+    qvu_arg = curator_client.QueryVDiskUsageArg()
+    for vdisk_id in self.local_only_vdisk_list:
+      qvu_arg.vdisk_id_list.append(vdisk_id)
+
+      '''
       vdisk_config = get_vdisk_config(LocalPithosClient, vdisk_id)
       if not vdisk_config:
         log.ERROR("Snapshot: couldn't fetch vdisk_id config for %d" % vdisk_id)
         continue
       self.vdisk_list.append(Vdisk(vdisk_config.vdisk_name, vdisk_config.vdisk_id))
+      '''
+    log.INFO("Querying vdisks' usage for %s" %  self.local_only_vdisk_list)
+    try:
+      qvu_ret = CuratorRpcClient.QueryVDiskUsage(qvu_arg)
+    except Exception as e:
+      log.ERROR("QueryVDiskUsage failed for %s failed with: %s" % (qvu_arg.vdisk_id_list, e))
+    for idx, id in enumerate(qvu_arg.vdisk_id_list):
+      if qvu_ret:
+        self.vdisk_list.append(Vdisk("", id, qvu_ret.exclusive_usage_bytes[idx]))
 
 class PD(object):
   def __init__(self, name=None):
@@ -198,7 +237,6 @@ class PD(object):
       CerebroRpcClient = CerebroInterfaceTool()
     self.cerebro = CerebroRpcClient
     arg = QueryProtectionDomainArg()
-    ret = QueryProtectionDomainRet()
     arg.protection_domain_name = name
     arg.list_snapshot_handles.CopyFrom(QueryProtectionDomainArg.ListSnapshotHandles())
     try:
@@ -226,11 +264,12 @@ def visit_all_pds():
   except CerebroInterfaceError as e:
     print "Error getting list of pds" % e
   if not ret:
-    log.ERRO("Couldn't get the PD list")
+    log.ERROR("Couldn't get the PD list")
     return
   pd_name_list = ret.protection_domain_name
   pd_list = []
   for pd_name in pd_name_list:
+    log.INFO("Reading PD %s" % pd_name)
     pd_list.append(PD(pd_name))
   return pd_list
 
@@ -271,6 +310,7 @@ def get_vdisk_usage(vdisk_list):
 
 if __name__ == "__main__":
   log.initialize()
+  argv = FLAGS(sys.argv)
   get_remote_site_map()
   pd_obj_list = visit_all_pds()
   for pd in pd_obj_list:
