@@ -1,11 +1,12 @@
 #
 # Copyright (c) 2014 Nutanix Inc. All rights reserved.
 #
-# Author: rnallan@nutanix.com
+# Author: rnallan@nutanix.com, nagaraj@nutanix.com
 #
 # Simple helper to access the metadata from medusa
-# It can lookup:
+# It can lookup/scan:
 #  - NearSyncStagingAreaMap
+#    The medusa_lookup currently cannot scan NearSyncStagingAreaMap. Hence the need for this script
 # Can be extended to do any map
 # Do a scan
 #
@@ -32,11 +33,6 @@ except:
   from util.cassandra.client import CassandraClient, CassandraClientError
 
 from medusa.medusa_pb2 import MedusaNearSyncStagingAreaMapEntryProto
-
-gflags.DEFINE_integer("nfs_map_lookup_batch_size",
-                      64,
-                      "Maximum number of Cassandra rows to read in one RPC "
-                      "when doing lookups on the NFS map in Cassandra.")
 
 FLAGS = gflags.FLAGS
 
